@@ -1,0 +1,38 @@
+run:
+  run_id: "2026-03-11_01"
+  output_dir: "outputs/${run.run_id}"
+  seed: 42
+
+provider:
+  type: "file_patch"
+  data_root: "${DATA_ROOT}"
+  patch_manifest: "configs/patch_list.json"
+  inputs:
+    intersections: "Intersection"
+    topology: "Topology"
+    pointcloud: "PointCloud"
+    isolated_elements: "Vector/IsolatedElements"
+    laneinfo: "LaneInfo"
+    trajectory: "Traj"
+
+modules:
+  t01_intersection_verification:
+    enabled: true
+    params:
+      auto_fix_enabled: true
+      manual_breakpoint_top_n: 20
+
+  t02_segment_extraction:
+    enabled: true
+    params:
+      min_segment_length_m: 5.0
+
+  t03_segment_construction:
+    enabled: true
+    params:
+      allow_isolated_edges: false
+
+  t04_intersection_modeling:
+    enabled: true
+    params:
+      signal_binding_enabled: true
