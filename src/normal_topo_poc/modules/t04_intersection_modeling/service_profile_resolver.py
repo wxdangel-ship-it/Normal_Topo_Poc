@@ -7,6 +7,7 @@ from .models import ApproachModel
 from .normalize import normalize_key
 
 _MANUAL_SERVICE_PROFILE_ALLOWED = {"left_uturn_service"}
+_LEFT_UTURN_SERVICE_FORMWAY = 256
 
 
 def find_raw_formway_value(*, raw_properties: dict[str, Any]) -> Any | None:
@@ -17,8 +18,10 @@ def find_raw_formway_value(*, raw_properties: dict[str, Any]) -> Any | None:
 
 
 def detect_left_uturn_service_from_raw(*, raw_properties: dict[str, Any]) -> str | None:
-    _ = find_raw_formway_value(raw_properties=raw_properties)
-    # TODO: enable detection only after the real formway field mapping and bit semantics are confirmed.
+    raw_formway = find_raw_formway_value(raw_properties=raw_properties)
+    formway_value = _coerce_formway_int(raw_formway)
+    if formway_value == _LEFT_UTURN_SERVICE_FORMWAY:
+        return "left_uturn_service"
     return None
 
 
@@ -138,6 +141,23 @@ def _resolve_entry_ref(*, ref: str, entry_ref_index: dict[str, str]) -> str:
     if resolved is None:
         raise ValueError(f"manual_service_ref_not_found:{ref}")
     return resolved
+
+
+def _coerce_formway_int(raw_formway: Any | None) -> int | None:
+    if raw_formway is None:
+        return None
+    try:
+        if isinstance(raw_formway, bool):
+            return int(raw_formway)
+        if isinstance(raw_formway, int):
+            return raw_formway
+        if isinstance(raw_formway, float):
+            if raw_formway.is_integer():
+                return int(raw_formway)
+            return None
+        return int(str(raw_formway).strip())
+    except Exception:
+        return None
 
 
 __all__ = [

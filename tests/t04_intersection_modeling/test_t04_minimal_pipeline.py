@@ -273,6 +273,12 @@ def test_service_profile_auto_detection_hook_is_safe_placeholder() -> None:
     assert detect_left_uturn_service_from_raw(raw_properties=raw) is None
 
 
+def test_service_profile_auto_detection_recognizes_formway_256() -> None:
+    raw = {"FormWay": 256}
+    assert find_raw_formway_value(raw_properties=raw) == 256
+    assert detect_left_uturn_service_from_raw(raw_properties=raw) == "left_uturn_service"
+
+
 def test_manual_service_profile_map_injects_left_uturn_service_without_formway() -> None:
     nodes = [_node(1, 0.0, -1.0), _node(2, 0.0, 1.0), _node(3, -1.0, 0.0), _node(4, 1.0, 0.0)]
     roads = [
@@ -636,6 +642,32 @@ def test_builder_keeps_raw_formway_as_safe_placeholder_without_profile_injection
     assert south_entry.approach_profile_source == "auto_detection_placeholder_no_hit"
     assert south_entry.paired_mainline_source == "not_applicable"
     assert any("auto service-road inference stays disabled" in remark for remark in south_entry.remarks)
+
+
+def test_builder_auto_detects_formway_256_as_left_uturn_service() -> None:
+    nodes = [_node(1, 0.0, -1.0), _node(2, 0.0, 1.0), _node(3, -1.0, 0.0), _node(4, 1.0, 0.0)]
+    roads = [
+        _road(
+            "south_service",
+            [(0.0, -1.0), (0.0, -10.0)],
+            snodeid=1,
+            enodeid=101,
+            extra_properties={"formway": 256},
+        ),
+        _road("north", [(0.0, 1.0), (0.0, 10.0)], snodeid=2, enodeid=102),
+        _road("west", [(-1.0, 0.0), (-10.0, 0.0)], snodeid=3, enodeid=103),
+        _road("east", [(1.0, 0.0), (10.0, 0.0)], snodeid=4, enodeid=104),
+    ]
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    south_entry = bundle.approach_index["intersection:100|south_service:entry"]
+    assert south_entry.approach_profile == "left_uturn_service"
+    assert south_entry.approach_profile_source == "auto_detected"
+
+    decisions = _decision_map(evaluate_bundle(bundle))
+    assert decisions[("south_service:entry", "west:exit")].status == "allowed"
+    assert decisions[("south_service:entry", "south_service:exit")].status == "allowed"
+    assert decisions[("south_service:entry", "north:exit")].status == "forbidden"
+    assert decisions[("south_service:entry", "east:exit")].status == "forbidden"
 
 
 def test_left_service_without_pair_override_keeps_placeholder_pair_source() -> None:
