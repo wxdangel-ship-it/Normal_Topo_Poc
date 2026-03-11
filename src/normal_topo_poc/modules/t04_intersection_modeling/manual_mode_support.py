@@ -4,8 +4,11 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .normalize import vector_angle_deg
+
 if TYPE_CHECKING:
     from .api import T04RunResult
+    from .models import ApproachModel
 
 
 _SUPPORTED_MANUAL_PROFILES = ("left_uturn_service",)
@@ -40,6 +43,58 @@ def build_approach_catalog(result: T04RunResult) -> dict[str, Any]:
         "mainid": result.bundle.intersection.node_group_id,
         "approach_count": len(approaches),
         "approaches": approaches,
+    }
+
+
+def build_arm_debug_payload(result: T04RunResult) -> dict[str, Any]:
+    approaches = tuple(result.bundle.approaches)
+    ordered_nodes, node_index_by_id, centroid = _build_ordered_node_entries(approaches)
+    circular_approach_order = [
+        dict(approach_item)
+        for node_entry in ordered_nodes
+        for approach_item in node_entry["approaches"]
+    ]
+    total_nodes = len(ordered_nodes)
+    arms: list[dict[str, Any]] = []
+    for arm in sorted(
+        result.bundle.arms,
+        key=lambda item: (float(item.representative_angle_deg), item.arm_id),
+    ):
+        member_approaches = sorted(
+            (approach for approach in approaches if approach.arm_id == arm.arm_id),
+            key=_approach_sort_key,
+        )
+        member_node_ids = _stable_unique([approach.node_id for approach in member_approaches])
+        member_node_ids.sort(key=lambda node_id: node_index_by_id.get(node_id, total_nodes))
+        member_node_indexes = [
+            node_index_by_id[node_id]
+            for node_id in member_node_ids
+            if node_id in node_index_by_id
+        ]
+        member_node_spans = _build_circular_spans(member_node_indexes, total_nodes)
+        arms.append(
+            {
+                "arm_id": arm.arm_id,
+                "representative_angle_deg": float(arm.representative_angle_deg),
+                "arm_heading_group": arm.arm_heading_group,
+                "remarks": list(arm.remarks),
+                "member_approach_ids": [approach.approach_id for approach in member_approaches],
+                "member_node_ids": member_node_ids,
+                "member_node_order_indexes": member_node_indexes,
+                "member_node_spans": member_node_spans,
+                "is_contiguous_on_circle": len(member_node_spans) <= 1,
+            }
+        )
+    return {
+        "intersection_id": result.bundle.intersection.intersection_id,
+        "mainid": result.bundle.intersection.node_group_id,
+        "approach_count": len(approaches),
+        "arm_count": len(result.bundle.arms),
+        "node_count": len(ordered_nodes),
+        "centroid": centroid,
+        "ordered_nodes": ordered_nodes,
+        "circular_approach_order": circular_approach_order,
+        "arms": arms,
     }
 
 
@@ -208,6 +263,13 @@ def write_t04_manual_support_outputs(
             encoding="utf-8",
         )
         written_files["approach_catalog.json"] = str(catalog_path)
+    if write_catalog or write_review:
+        arm_debug_path = resolved_dir / "arm_debug.json"
+        arm_debug_path.write_text(
+            json.dumps(build_arm_debug_payload(result), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        written_files["arm_debug.json"] = str(arm_debug_path)
     if write_override_template:
         template_path = resolved_dir / "manual_override.template.json"
         template_path.write_text(
@@ -285,7 +347,149 @@ def _build_review_summary_text(
     return "\n".join(lines) + "\n"
 
 
+def _build_ordered_node_entries(
+    approaches: tuple[ApproachModel, ...] | list[ApproachModel],
+) -> tuple[list[dict[str, Any]], dict[Any, int], list[float] | None]:
+    node_points: dict[Any, tuple[float, float]] = {}
+    node_approaches: dict[Any, list[ApproachModel]] = {}
+    for approach in approaches:
+        if approach.geometry_ref.point is None:
+            continue
+        node_points[approach.node_id] = (
+            float(approach.geometry_ref.point.x),
+            float(approach.geometry_ref.point.y),
+        )
+        node_approaches.setdefault(approach.node_id, []).append(approach)
+    if not node_points:
+        return ([], {}, None)
+
+    centroid_x = sum(point[0] for point in node_points.values()) / len(node_points)
+    centroid_y = sum(point[1] for point in node_points.values()) / len(node_points)
+    centroid = [float(centroid_x), float(centroid_y)]
+    ordered_node_ids = sorted(
+        node_points.keys(),
+        key=lambda node_id: (
+            _node_angle_deg(node_points[node_id], centroid_x, centroid_y, node_approaches.get(node_id, [])),
+            str(node_id),
+        ),
+    )
+    node_index_by_id = {
+        node_id: index
+        for index, node_id in enumerate(ordered_node_ids)
+    }
+    ordered_nodes: list[dict[str, Any]] = []
+    for node_id in ordered_node_ids:
+        point = node_points[node_id]
+        approaches_for_node = sorted(node_approaches.get(node_id, []), key=_approach_sort_key)
+        ordered_nodes.append(
+            {
+                "node_id": node_id,
+                "node_order_index": node_index_by_id[node_id],
+                "node_angle_deg": _node_angle_deg(point, centroid_x, centroid_y, approaches_for_node),
+                "point": [float(point[0]), float(point[1])],
+                "arm_ids": _stable_unique([approach.arm_id for approach in approaches_for_node]),
+                "approach_ids": [approach.approach_id for approach in approaches_for_node],
+                "approaches": [_serialize_arm_debug_approach(approach) for approach in approaches_for_node],
+            }
+        )
+    return (ordered_nodes, node_index_by_id, centroid)
+
+
+def _node_angle_deg(
+    point: tuple[float, float],
+    centroid_x: float,
+    centroid_y: float,
+    approaches: list[ApproachModel],
+) -> float:
+    dx = float(point[0] - centroid_x)
+    dy = float(point[1] - centroid_y)
+    if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+        if approaches:
+            return float(sum(float(approach.side_angle_deg) for approach in approaches) / len(approaches))
+        return 0.0
+    return float(vector_angle_deg(dx, dy))
+
+
+def _serialize_arm_debug_approach(approach: ApproachModel) -> dict[str, Any]:
+    point = None
+    if approach.geometry_ref.point is not None:
+        point = [
+            float(approach.geometry_ref.point.x),
+            float(approach.geometry_ref.point.y),
+        ]
+    return {
+        "approach_id": approach.approach_id,
+        "road_id": approach.road_id,
+        "node_id": approach.node_id,
+        "arm_id": approach.arm_id,
+        "movement_side": approach.movement_side,
+        "direction_type": approach.direction_type,
+        "side_angle_deg": float(approach.side_angle_deg),
+        "travel_angle_deg": float(approach.travel_angle_deg),
+        "lateral_rank": approach.lateral_rank,
+        "approach_profile": approach.approach_profile,
+        "approach_profile_source": approach.approach_profile_source,
+        "paired_mainline_approach_id": approach.paired_mainline_approach_id,
+        "paired_mainline_source": approach.paired_mainline_source,
+        "exit_leg_role": approach.exit_leg_role,
+        "is_standard_exit_leg": approach.is_standard_exit_leg,
+        "is_core_signalized_approach": approach.is_core_signalized_approach,
+        "signalized_control_zone_id": approach.signalized_control_zone_id,
+        "point": point,
+    }
+
+
+def _approach_sort_key(approach: ApproachModel) -> tuple[float, int, int, str]:
+    movement_side_rank = 0 if approach.movement_side == "entry" else 1
+    lateral_rank = int(approach.lateral_rank) if approach.lateral_rank is not None else 999
+    return (
+        float(approach.side_angle_deg),
+        movement_side_rank,
+        lateral_rank,
+        approach.approach_id,
+    )
+
+
+def _stable_unique(values: list[Any]) -> list[Any]:
+    seen: set[Any] = set()
+    out: list[Any] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _build_circular_spans(indexes: list[int], total_nodes: int) -> list[dict[str, Any]]:
+    if not indexes or total_nodes <= 0:
+        return []
+    sorted_indexes = sorted(set(indexes))
+    segments: list[list[int]] = [[sorted_indexes[0]]]
+    for index in sorted_indexes[1:]:
+        if index == segments[-1][-1] + 1:
+            segments[-1].append(index)
+        else:
+            segments.append([index])
+    if (
+        len(segments) > 1
+        and segments[0][0] == 0
+        and segments[-1][-1] == total_nodes - 1
+    ):
+        segments = [[*segments[-1], *segments[0]], *segments[1:-1]]
+    return [
+        {
+            "start_index": segment[0],
+            "end_index": segment[-1],
+            "node_count": len(segment),
+            "node_indexes": segment,
+        }
+        for segment in segments
+    ]
+
+
 __all__ = [
+    "build_arm_debug_payload",
     "build_approach_catalog",
     "build_manual_override_template",
     "build_review_bundle",

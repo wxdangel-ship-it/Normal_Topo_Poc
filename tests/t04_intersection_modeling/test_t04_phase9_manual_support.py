@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from normal_topo_poc.modules.t04_intersection_modeling import (
+    build_arm_debug_payload,
     build_approach_catalog,
     build_manual_override_template,
     build_review_nonstandard_targets,
@@ -146,6 +147,19 @@ def test_manual_override_template_has_expected_sections() -> None:
     assert payload["selector_examples"]["entry_approach_ids"]
 
 
+def test_arm_debug_payload_contains_ccw_nodes_and_arm_membership() -> None:
+    result = _result_for_manual_support_review()
+    payload = build_arm_debug_payload(result)
+    assert payload["intersection_id"] == "intersection:100"
+    assert payload["mainid"] == 100
+    assert payload["node_count"] == 3
+    assert len(payload["ordered_nodes"]) == 3
+    assert len(payload["circular_approach_order"]) == len(result.bundle.approaches)
+    assert len(payload["arms"]) == len(result.bundle.arms)
+    assert payload["ordered_nodes"][0]["approaches"]
+    assert "member_node_spans" in payload["arms"][0]
+
+
 def test_review_payloads_cover_unknown_nonstandard_and_profile_gap_views() -> None:
     result = _result_for_manual_support_review()
     unknown_payload = build_review_unknown_movements(result)
@@ -170,6 +184,7 @@ def test_writer_can_emit_catalog_template_and_review_outputs(tmp_path: Path) -> 
         include_review=True,
     )
     assert "approach_catalog.json" in written
+    assert "arm_debug.json" in written
     assert "manual_override.template.json" in written
     assert "review_unknown_movements.json" in written
     assert "review_nonstandard_targets.json" in written
@@ -178,10 +193,12 @@ def test_writer_can_emit_catalog_template_and_review_outputs(tmp_path: Path) -> 
     assert "review_bundle.html" in written
 
     catalog = json.loads((tmp_path / "approach_catalog.json").read_text(encoding="utf-8"))
+    arm_debug = json.loads((tmp_path / "arm_debug.json").read_text(encoding="utf-8"))
     template = json.loads((tmp_path / "manual_override.template.json").read_text(encoding="utf-8"))
     review_unknown = json.loads((tmp_path / "review_unknown_movements.json").read_text(encoding="utf-8"))
     review_html = (tmp_path / "review_bundle.html").read_text(encoding="utf-8")
     assert catalog["intersection_id"] == "intersection:100"
+    assert arm_debug["node_count"] == 3
     assert template["service_profile_map"] == {}
     assert review_unknown["unknown_movement_count"] >= 1
     assert "Source Arm / Approach -&gt; Target Arm / Approach" in review_html
@@ -215,6 +232,7 @@ def test_cli_patch_dir_mode_can_emit_manual_support_outputs(tmp_path: Path) -> N
     )
     assert proc.returncode == 0, proc.stderr
     assert (output_dir / "approach_catalog.json").exists()
+    assert (output_dir / "arm_debug.json").exists()
     assert (output_dir / "manual_override.template.json").exists()
     assert (output_dir / "review_unknown_movements.json").exists()
     assert (output_dir / "review_nonstandard_targets.json").exists()
@@ -248,6 +266,7 @@ def test_cli_patch_root_mode_can_emit_manual_support_outputs(tmp_path: Path) -> 
     )
     assert proc.returncode == 0, proc.stderr
     assert (output_root / "patch_a" / "mainid_100" / "approach_catalog.json").exists()
+    assert (output_root / "patch_a" / "mainid_100" / "arm_debug.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "manual_override.template.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "review_unknown_movements.json").exists()
     assert (output_root / "patch_a" / "mainid_100" / "review_bundle.html").exists()

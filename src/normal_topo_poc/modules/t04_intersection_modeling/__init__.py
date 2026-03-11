@@ -60,6 +60,7 @@ try:
         write_t04_cropped_inputs,
     )
     from .manual_mode_support import (
+        build_arm_debug_payload,
         build_approach_catalog,
         build_manual_override_template,
         build_review_bundle,
@@ -185,6 +186,7 @@ __all__ = [
     "build_movement_matrix",
     "build_intersection_bundles",
     "build_intersection_bundles_with_manual_overrides",
+    "build_arm_debug_payload",
     "build_approach_catalog",
     "build_catalog_selector_inventory",
     "build_manual_override_template",
