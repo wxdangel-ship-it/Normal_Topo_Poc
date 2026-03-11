@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_COMPUTE_BUFFER_M = 200.0
+DEFAULT_CROP_BUFFER_M = 80.0
 _RUNTIME: dict[str, Any] | None = None
 
 
@@ -31,6 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_COMPUTE_BUFFER_M,
         help="Reserved compute buffer in meters for future geometry acceleration only",
     )
+    parser.add_argument(
+        "--crop-buffer-m",
+        type=float,
+        default=DEFAULT_CROP_BUFFER_M,
+        help="BBox padding used only when exporting cropped RCSDNode/RCSDRoad for visual inspection",
+    )
+    parser.add_argument("--crop-inputs-only", action="store_true", help="Export cropped RCSDNode/RCSDRoad and exit")
     parser.add_argument("--emit-review-bundle", action="store_true", help="Write run result + catalog + template + review outputs")
     parser.add_argument("--emit-catalog", action="store_true", help="Write approach_catalog.json")
     parser.add_argument(
@@ -59,7 +67,19 @@ def _runtime() -> dict[str, Any]:
         )
         from .baseline_regression import run_t04_baseline_regression_smoke
         from .dataset_runner import build_t04_dataset_mainnodeid_summary, run_t04_mainnodeids_from_geojson_dataset
-        from .geojson_io import coerce_mainid_value, parse_mainid_values
+        from .geojson_io import (
+            coerce_mainid_value,
+            discover_patch_dir_inputs,
+            list_available_mainids,
+            load_geojson_feature_collection,
+            parse_mainid_values,
+        )
+        from .input_cropper import (
+            build_t04_cropped_input_dataset_summary,
+            build_t04_cropped_input_summary,
+            export_t04_cropped_inputs_from_geojson_files,
+            run_t04_cropped_inputs_from_dataset,
+        )
         from .manual_mode_support import build_approach_catalog
         from .multi_patch import build_t04_multi_patch_summary, run_t04_multi_patch_manual_mode
         from .override_roundtrip import roundtrip_manual_override_source, write_override_roundtrip_report
@@ -74,6 +94,8 @@ def _runtime() -> dict[str, Any]:
 
         _RUNTIME = {
             "build_approach_catalog": build_approach_catalog,
+            "build_t04_cropped_input_dataset_summary": build_t04_cropped_input_dataset_summary,
+            "build_t04_cropped_input_summary": build_t04_cropped_input_summary,
             "build_t04_dataset_mainnodeid_summary": build_t04_dataset_mainnodeid_summary,
             "build_t04_multi_patch_summary": build_t04_multi_patch_summary,
             "build_t04_patch_root_review_cycle_summary": build_t04_patch_root_review_cycle_summary,
@@ -82,10 +104,15 @@ def _runtime() -> dict[str, Any]:
             "coerce_mainid_value": coerce_mainid_value,
             "compare_t04_run_dirs": compare_t04_run_dirs,
             "compare_t04_run_dirs_and_write_outputs": compare_t04_run_dirs_and_write_outputs,
+            "discover_patch_dir_inputs": discover_patch_dir_inputs,
+            "export_t04_cropped_inputs_from_geojson_files": export_t04_cropped_inputs_from_geojson_files,
+            "list_available_mainids": list_available_mainids,
+            "load_geojson_feature_collection": load_geojson_feature_collection,
             "parse_mainid_values": parse_mainid_values,
             "roundtrip_manual_override_source": roundtrip_manual_override_source,
             "run_t04_all_intersections_from_patch_dir": run_t04_all_intersections_from_patch_dir,
             "run_t04_baseline_regression_smoke": run_t04_baseline_regression_smoke,
+            "run_t04_cropped_inputs_from_dataset": run_t04_cropped_inputs_from_dataset,
             "run_t04_mainnodeids_from_geojson_dataset": run_t04_mainnodeids_from_geojson_dataset,
             "run_t04_multi_patch_manual_mode": run_t04_multi_patch_manual_mode,
             "run_t04_review_cycle_from_patch_dir": run_t04_review_cycle_from_patch_dir,
@@ -124,6 +151,8 @@ def _run_from_args(args: argparse.Namespace) -> dict[str, Any]:
     override_root = args.override_root
     output_dir = args.output_dir
     compute_buffer_m = float(args.compute_buffer_m)
+    crop_buffer_m = float(args.crop_buffer_m)
+    crop_inputs_only = bool(args.crop_inputs_only)
     emit_review_bundle = bool(args.emit_review_bundle)
     emit_catalog = bool(args.emit_catalog or emit_review_bundle)
     emit_override_template = bool(args.emit_override_template or emit_review_bundle)
@@ -157,6 +186,65 @@ def _run_from_args(args: argparse.Namespace) -> dict[str, Any]:
         return {
             "mode": "baseline_regression_smoke",
             **payload,
+        }
+    if crop_inputs_only:
+        if any((manual_override, override_root, validate_override, review_cycle_mode, diff_mode, regression_smoke_mode)):
+            raise ValueError("cli_conflict:crop_inputs_only_does_not_accept_runtime_or_review_flags")
+        if emit_extra_outputs:
+            raise ValueError("cli_conflict:crop_inputs_only_does_not_accept_emit_flags")
+        if not output_dir:
+            raise ValueError("cli_crop_inputs_requires_output_dir")
+        if patch_root:
+            raise ValueError("cli_crop_inputs_only_does_not_support_patch_root")
+        if dataset_dir:
+            result = runtime["run_t04_cropped_inputs_from_dataset"](
+                dataset_dir=dataset_dir,
+                mainnodeids=mainnodeids,
+                output_root=output_dir,
+                crop_buffer_m=crop_buffer_m,
+            )
+            return {
+                "mode": "cropped_inputs_dataset",
+                **runtime["build_t04_cropped_input_dataset_summary"](result),
+            }
+        if patch_dir:
+            if args.all_mainids:
+                node_path, _road_path = runtime["discover_patch_dir_inputs"](patch_dir)
+                available_mainids = runtime["list_available_mainids"](runtime["load_geojson_feature_collection"](node_path))
+                result = runtime["run_t04_cropped_inputs_from_dataset"](
+                    dataset_dir=patch_dir,
+                    mainnodeids=available_mainids,
+                    output_root=output_dir,
+                    crop_buffer_m=crop_buffer_m,
+                )
+                return {
+                    "mode": "cropped_inputs_dataset",
+                    **runtime["build_t04_cropped_input_dataset_summary"](result),
+                }
+            node_path, road_path = runtime["discover_patch_dir_inputs"](patch_dir)
+            crop_result = runtime["export_t04_cropped_inputs_from_geojson_files"](
+                node_geojson_path=node_path,
+                road_geojson_path=road_path,
+                mainid=mainid,
+                output_dir=output_dir,
+                crop_buffer_m=crop_buffer_m,
+            )
+            return {
+                "mode": "cropped_inputs_single",
+                **runtime["build_t04_cropped_input_summary"](crop_result),
+            }
+        if not node_file or not road_file:
+            raise ValueError("cli_crop_inputs_requires_dataset_dir_patch_dir_or_node_file_and_road_file")
+        crop_result = runtime["export_t04_cropped_inputs_from_geojson_files"](
+            node_geojson_path=node_file,
+            road_geojson_path=road_file,
+            mainid=mainid,
+            output_dir=output_dir,
+            crop_buffer_m=crop_buffer_m,
+        )
+        return {
+            "mode": "cropped_inputs_single",
+            **runtime["build_t04_cropped_input_summary"](crop_result),
         }
     if emit_extra_outputs and not output_dir:
         raise ValueError("cli_emit_outputs_requires_output_dir")
@@ -253,7 +341,7 @@ def _run_from_args(args: argparse.Namespace) -> dict[str, Any]:
                 diff_against_dir=args.diff_against_dir,
             )
             return {
-                **build_t04_review_cycle_summary(result),
+                **runtime["build_t04_review_cycle_summary"](result),
                 "has_diff": result.diff_payload is not None,
             }
         if args.all_mainids:
