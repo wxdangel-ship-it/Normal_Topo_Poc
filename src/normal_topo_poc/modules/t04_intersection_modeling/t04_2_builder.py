@@ -57,6 +57,7 @@ _EXIT_ROLE_ALLOWED = {
 }
 
 _ARM_CLUSTER_DEG = 40.0
+_ARM_SINGLETON_MERGE_DEG = 60.0
 
 
 def approach_key(road_id: str, movement_side: str) -> str:
@@ -335,23 +336,27 @@ def _assign_arms(
     intersection: IntersectionModel,
     approaches: list[ApproachModel],
 ) -> tuple[list[ArmModel], list[ApproachModel]]:
+    approach_by_id = {approach.approach_id: approach for approach in approaches}
     clusters: list[dict[str, Any]] = []
-    updated: list[ApproachModel] = []
     for approach in sorted(approaches, key=lambda item: (item.side_angle_deg, item.approach_id)):
         best_idx = _best_cluster_index(approach.side_angle_deg, clusters)
         if best_idx is None:
             clusters.append({"angles": [approach.side_angle_deg], "members": [approach.approach_id]})
-            best_idx = len(clusters) - 1
         else:
             clusters[best_idx]["angles"].append(approach.side_angle_deg)
             clusters[best_idx]["members"].append(approach.approach_id)
-        updated.append(replace(approach, arm_id=f"{intersection.intersection_id}|arm:{best_idx}"))
+
+    clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
 
     arms: list[ArmModel] = []
+    arm_id_by_approach: dict[str, str] = {}
     for idx, cluster in enumerate(clusters):
+        arm_id = f"{intersection.intersection_id}|arm:{idx}"
+        for approach_id in cluster["members"]:
+            arm_id_by_approach[approach_id] = arm_id
         arms.append(
             ArmModel(
-                arm_id=f"{intersection.intersection_id}|arm:{idx}",
+                arm_id=arm_id,
                 intersection_id=intersection.intersection_id,
                 member_approach_ids=tuple(cluster["members"]),
                 arm_heading_group=f"group_{idx}",
@@ -359,6 +364,7 @@ def _assign_arms(
                 remarks=("TODO: arm_heading_group remains abstract; no absolute NSEW binding in MVP",),
             )
         )
+    updated = [replace(approach, arm_id=arm_id_by_approach[approach.approach_id]) for approach in approaches]
     return arms, updated
 
 
@@ -371,6 +377,52 @@ def _best_cluster_index(angle: float, clusters: list[dict[str, Any]]) -> int | N
             best_idx = idx
             best_diff = diff
     return best_idx
+
+
+def _merge_singleton_one_side_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> list[dict[str, Any]]:
+    merged = [{"angles": list(cluster["angles"]), "members": list(cluster["members"])} for cluster in clusters]
+    while True:
+        best_pair: tuple[float, int, int] | None = None
+        for idx, cluster in enumerate(merged):
+            if len(cluster["members"]) != 1:
+                continue
+            movement_sides = _cluster_movement_sides(cluster, approach_by_id=approach_by_id)
+            if len(movement_sides) != 1:
+                continue
+            cluster_angle = _mean_angle_deg(cluster["angles"])
+            for target_idx, target in enumerate(merged):
+                if target_idx == idx or len(target["members"]) < 2:
+                    continue
+                diff = circular_diff_deg(cluster_angle, _mean_angle_deg(target["angles"]))
+                if diff > _ARM_SINGLETON_MERGE_DEG:
+                    continue
+                pair = (diff, idx, target_idx)
+                if best_pair is None or pair < best_pair:
+                    best_pair = pair
+        if best_pair is None:
+            return merged
+
+        _diff, source_idx, target_idx = best_pair
+        if source_idx < target_idx:
+            source_cluster = merged.pop(source_idx)
+            target_cluster = merged[target_idx - 1]
+        else:
+            source_cluster = merged.pop(source_idx)
+            target_cluster = merged[target_idx]
+        target_cluster["angles"].extend(source_cluster["angles"])
+        target_cluster["members"].extend(source_cluster["members"])
+
+
+def _cluster_movement_sides(
+    cluster: dict[str, Any],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> set[str]:
+    return {approach_by_id[approach_id].movement_side for approach_id in cluster["members"]}
 
 
 def _mean_angle_deg(angles: list[float]) -> float:

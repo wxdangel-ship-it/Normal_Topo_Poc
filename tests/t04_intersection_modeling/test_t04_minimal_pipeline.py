@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -149,6 +150,44 @@ def test_t04v01_basic_four_arm_pipeline() -> None:
     assert decisions[("south:entry", "west:exit")].reason_codes == ("DEFAULT_CORE_LEFT_ALLOWED",)
     assert decisions[("south:entry", "south:exit")].status == "unknown"
     assert decisions[("south:entry", "south:exit")].reason_codes == ("DEFAULT_UTURN_UNKNOWN",)
+
+
+def test_t04v01b_singleton_entry_clusters_merge_into_nearby_main_arms() -> None:
+    def polar_point(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return (round(radius * math.cos(rad), 6), round(radius * math.sin(rad), 6))
+
+    def ray(angle_deg: float, *, radius: float = 1.0, length: float = 10.0) -> list[tuple[float, float]]:
+        start_x, start_y = polar_point(angle_deg, radius)
+        end_x, end_y = polar_point(angle_deg, radius + length)
+        return [(start_x, start_y), (end_x, end_y)]
+
+    node_specs = [
+        (1, 0.0),
+        (2, 90.0),
+        (3, 180.0),
+        (4, 270.0),
+        (5, 41.0),
+        (6, 319.0),
+    ]
+    nodes = [_node(node_id, *polar_point(angle_deg), mainid=100) for node_id, angle_deg in node_specs]
+    roads = [
+        _road("east_main", ray(0.0), snodeid=1, enodeid=101, direction=1),
+        _road("north_main", ray(90.0), snodeid=2, enodeid=102, direction=1),
+        _road("west_main", ray(180.0), snodeid=3, enodeid=103, direction=1),
+        _road("south_main", ray(270.0), snodeid=4, enodeid=104, direction=1),
+        _road("north_east_entry", ray(41.0), snodeid=5, enodeid=105, direction=3),
+        _road("south_east_entry", ray(319.0), snodeid=6, enodeid=106, direction=3),
+    ]
+
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    assert len(bundle.arms) == 4
+    assert len(bundle.approaches) == 10
+
+    approach_index = bundle.approach_index
+    member_count_by_arm = {arm.arm_id: len(arm.member_approach_ids) for arm in bundle.arms}
+    assert member_count_by_arm[approach_index["intersection:100|north_east_entry:entry"].arm_id] >= 2
+    assert member_count_by_arm[approach_index["intersection:100|south_east_entry:entry"].arm_id] >= 2
 
 
 def test_t04v02_single_parallel_cross_defaults_unknown() -> None:
