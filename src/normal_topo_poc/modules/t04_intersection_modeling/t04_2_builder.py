@@ -338,21 +338,8 @@ def _assign_arms(
     approaches: list[ApproachModel],
 ) -> tuple[list[ArmModel], list[ApproachModel]]:
     approach_by_id = {approach.approach_id: approach for approach in approaches}
-    entry_approaches = [approach for approach in approaches if approach.movement_side == "entry"]
-    exit_approaches = [approach for approach in approaches if approach.movement_side == "exit"]
-
-    if entry_approaches:
-        clusters = _build_contiguous_arm_clusters(entry_approaches)
-        clusters = _assign_exit_approaches_to_entry_clusters(
-            clusters=clusters,
-            exit_approaches=exit_approaches,
-            approach_by_id=approach_by_id,
-        )
-        clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
-    else:
-        clusters = _build_contiguous_arm_clusters(approaches)
-        clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
-
+    clusters = _build_contiguous_arm_clusters(approaches, approach_by_id=approach_by_id)
+    clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
     clusters = [_sorted_cluster(cluster, approach_by_id=approach_by_id) for cluster in clusters]
 
     arms: list[ArmModel] = []
@@ -375,28 +362,93 @@ def _assign_arms(
     return arms, updated
 
 
-def _build_contiguous_arm_clusters(approaches: list[ApproachModel]) -> list[dict[str, Any]]:
-    ordered = sorted(approaches, key=lambda item: (item.side_angle_deg, item.approach_id))
-    if not ordered:
+def _build_contiguous_arm_clusters(
+    approaches: list[ApproachModel],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> list[dict[str, Any]]:
+    ordered_nodes = _ordered_attached_nodes(approaches, approach_by_id=approach_by_id)
+    if not ordered_nodes:
         return []
 
-    clusters: list[dict[str, Any]] = [{"angles": [ordered[0].side_angle_deg], "members": [ordered[0].approach_id]}]
-    for prev, current in zip(ordered, ordered[1:]):
-        gap = float(current.side_angle_deg - prev.side_angle_deg)
-        if gap <= _ARM_CLUSTER_DEG:
-            clusters[-1]["angles"].append(current.side_angle_deg)
-            clusters[-1]["members"].append(current.approach_id)
+    clusters: list[dict[str, Any]] = [
+        {
+            "angles": list(ordered_nodes[0]["angles"]),
+            "members": list(ordered_nodes[0]["members"]),
+        }
+    ]
+    for current in ordered_nodes[1:]:
+        diff = circular_diff_deg(current["representative_angle_deg"], _mean_angle_deg(clusters[-1]["angles"]))
+        if diff <= _ARM_CLUSTER_DEG:
+            clusters[-1]["angles"].extend(current["angles"])
+            clusters[-1]["members"].extend(current["members"])
             continue
-        clusters.append({"angles": [current.side_angle_deg], "members": [current.approach_id]})
+        clusters.append({"angles": list(current["angles"]), "members": list(current["members"])})
 
     if len(clusters) >= 2:
-        wrap_gap = float((ordered[0].side_angle_deg + 360.0) - ordered[-1].side_angle_deg)
-        if wrap_gap <= _ARM_CLUSTER_DEG:
+        wrap_diff = circular_diff_deg(_mean_angle_deg(clusters[0]["angles"]), _mean_angle_deg(clusters[-1]["angles"]))
+        if wrap_diff <= _ARM_CLUSTER_DEG:
             first = clusters.pop(0)
             clusters[-1]["angles"].extend(first["angles"])
             clusters[-1]["members"].extend(first["members"])
 
     return clusters
+
+
+def _ordered_attached_nodes(
+    approaches: list[ApproachModel],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> list[dict[str, Any]]:
+    node_members: dict[Any, list[str]] = defaultdict(list)
+    node_points: dict[Any, Point] = {}
+    for approach in approaches:
+        node_members[approach.node_id].append(approach.approach_id)
+        if approach.geometry_ref.point is not None and approach.node_id not in node_points:
+            node_points[approach.node_id] = approach.geometry_ref.point
+
+    if not node_members:
+        return []
+
+    centroid_x, centroid_y = _attached_node_centroid(node_points)
+    ordered_nodes: list[dict[str, Any]] = []
+    for node_id, member_ids in node_members.items():
+        point = node_points.get(node_id)
+        if point is None:
+            node_angle_deg = _mean_angle_deg([approach_by_id[member_id].side_angle_deg for member_id in member_ids])
+        else:
+            node_angle_deg = vector_angle_deg(float(point.x - centroid_x), float(point.y - centroid_y))
+        ordered_member_ids = sorted(
+            member_ids,
+            key=lambda approach_id: (
+                approach_by_id[approach_id].side_angle_deg,
+                approach_by_id[approach_id].approach_id,
+            ),
+        )
+        ordered_nodes.append(
+            {
+                "node_id": node_id,
+                "node_angle_deg": node_angle_deg,
+                "representative_angle_deg": _mean_angle_deg(
+                    [approach_by_id[approach_id].side_angle_deg for approach_id in ordered_member_ids]
+                ),
+                "members": ordered_member_ids,
+                "angles": [approach_by_id[approach_id].side_angle_deg for approach_id in ordered_member_ids],
+            }
+        )
+
+    ordered_nodes.sort(key=lambda item: (item["node_angle_deg"], str(item["node_id"])))
+    return ordered_nodes
+
+
+def _attached_node_centroid(node_points: dict[Any, Point]) -> tuple[float, float]:
+    if not node_points:
+        return (0.0, 0.0)
+    points = list(node_points.values())
+    return (
+        float(sum(point.x for point in points) / len(points)),
+        float(sum(point.y for point in points) / len(points)),
+    )
 
 
 def _merge_singleton_one_side_clusters(
@@ -480,62 +532,6 @@ def _merge_adjacent_clusters(
     target_cluster["angles"] = [*source_cluster["angles"], *target_cluster["angles"]]
     target_cluster["members"] = [*source_cluster["members"], *target_cluster["members"]]
     del clusters[source_idx]
-
-
-def _assign_exit_approaches_to_entry_clusters(
-    *,
-    clusters: list[dict[str, Any]],
-    exit_approaches: list[ApproachModel],
-    approach_by_id: dict[str, ApproachModel],
-) -> list[dict[str, Any]]:
-    if not clusters or not exit_approaches:
-        return clusters
-
-    assigned = [{"angles": list(cluster["angles"]), "members": list(cluster["members"])} for cluster in clusters]
-    seed_angles = [_mean_angle_deg(cluster["angles"]) for cluster in clusters]
-    boundaries = _build_seed_boundaries(seed_angles)
-
-    for approach in sorted(exit_approaches, key=lambda item: (item.side_angle_deg, item.approach_id)):
-        cluster_idx = _seed_cluster_index_for_angle(approach.side_angle_deg, boundaries)
-        assigned[cluster_idx]["angles"].append(approach.side_angle_deg)
-        assigned[cluster_idx]["members"].append(approach.approach_id)
-    return assigned
-
-
-def _build_seed_boundaries(seed_angles: list[float]) -> list[tuple[float, float]]:
-    if len(seed_angles) == 1:
-        return [(0.0, 360.0)]
-
-    boundaries: list[float] = []
-    for idx, angle in enumerate(seed_angles):
-        next_angle = seed_angles[(idx + 1) % len(seed_angles)]
-        cw_delta = float((next_angle - angle) % 360.0)
-        boundaries.append(float((angle + cw_delta / 2.0) % 360.0))
-
-    spans: list[tuple[float, float]] = []
-    for idx in range(len(seed_angles)):
-        start = boundaries[idx - 1]
-        end = boundaries[idx]
-        spans.append((start, end))
-    return spans
-
-
-def _seed_cluster_index_for_angle(angle: float, boundaries: list[tuple[float, float]]) -> int:
-    for idx, (start, end) in enumerate(boundaries):
-        if _angle_in_ccw_interval(angle, start, end):
-            return idx
-    return 0
-
-
-def _angle_in_ccw_interval(angle: float, start: float, end: float) -> bool:
-    normalized = float(angle % 360.0)
-    start_norm = float(start % 360.0)
-    end_norm = float(end % 360.0)
-    if start_norm == end_norm:
-        return True
-    if start_norm < end_norm:
-        return start_norm <= normalized < end_norm
-    return normalized >= start_norm or normalized < end_norm
 
 
 def _sorted_cluster(
