@@ -57,7 +57,8 @@ _EXIT_ROLE_ALLOWED = {
 }
 
 _ARM_CLUSTER_DEG = 40.0
-_ARM_SINGLETON_MERGE_DEG = 60.0
+_ARM_SINGLETON_MERGE_DEG = 50.0
+_ARM_SINGLETON_CLEAR_GAP_DEG = 7.0
 
 
 def approach_key(road_id: str, movement_side: str) -> str:
@@ -394,15 +395,25 @@ def _merge_singleton_one_side_clusters(
             if len(movement_sides) != 1:
                 continue
             cluster_angle = _mean_angle_deg(cluster["angles"])
+            candidate_targets: list[tuple[float, int]] = []
             for target_idx, target in enumerate(merged):
                 if target_idx == idx or len(target["members"]) < 2:
                     continue
                 diff = circular_diff_deg(cluster_angle, _mean_angle_deg(target["angles"]))
                 if diff > _ARM_SINGLETON_MERGE_DEG:
                     continue
-                pair = (diff, idx, target_idx)
-                if best_pair is None or pair < best_pair:
-                    best_pair = pair
+                candidate_targets.append((diff, target_idx))
+            if not candidate_targets:
+                continue
+            candidate_targets.sort()
+            best_diff, best_target_idx = candidate_targets[0]
+            if len(candidate_targets) >= 2:
+                second_diff = candidate_targets[1][0]
+                if second_diff - best_diff < _ARM_SINGLETON_CLEAR_GAP_DEG:
+                    continue
+            pair = (best_diff, idx, best_target_idx)
+            if best_pair is None or pair < best_pair:
+                best_pair = pair
         if best_pair is None:
             return merged
 
@@ -525,6 +536,7 @@ def _build_movements(
     arms: list[ArmModel],
 ) -> list[MovementCandidate]:
     arm_by_id = {arm.arm_id: arm for arm in arms}
+    arm_side_counts = _count_approaches_by_arm_side(approaches)
     entries = [approach for approach in approaches if approach.movement_side == "entry"]
     exits = [approach for approach in approaches if approach.movement_side == "exit"]
     movements: list[MovementCandidate] = []
@@ -532,7 +544,11 @@ def _build_movements(
         for target in exits:
             relation = _arm_relation(arm_by_id[source.arm_id], arm_by_id[target.arm_id])
             turn_sense = _derive_turn_sense(source=source, target=target, arm_relation=relation)
-            cross_count = _derive_parallel_cross_count(source=source, target=target)
+            cross_count = _derive_parallel_cross_count(
+                source=source,
+                target=target,
+                arm_side_counts=arm_side_counts,
+            )
             remarks: list[str] = []
             if relation == "same":
                 remarks.append("same-arm target kept in uturn family; lateral shift remains in parallel_cross_count")
@@ -580,7 +596,16 @@ def _signed_angle_delta(source_deg: float, target_deg: float) -> float:
     return float((target_deg - source_deg + 180.0) % 360.0 - 180.0)
 
 
-def _derive_parallel_cross_count(*, source: ApproachModel, target: ApproachModel) -> int | str:
+def _derive_parallel_cross_count(
+    *,
+    source: ApproachModel,
+    target: ApproachModel,
+    arm_side_counts: dict[tuple[str, str], int],
+) -> int | str:
+    source_width = arm_side_counts.get((source.arm_id, source.movement_side), 0)
+    target_width = arm_side_counts.get((target.arm_id, target.movement_side), 0)
+    if source_width <= 1 or target_width <= 1:
+        return 0
     if source.lateral_rank is None or target.lateral_rank is None:
         return "unknown"
     delta = abs(int(source.lateral_rank) - int(target.lateral_rank))
@@ -589,3 +614,10 @@ def _derive_parallel_cross_count(*, source: ApproachModel, target: ApproachModel
     if delta == 1:
         return 1
     return "2+"
+
+
+def _count_approaches_by_arm_side(approaches: list[ApproachModel]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for approach in approaches:
+        counts[(approach.arm_id, approach.movement_side)] += 1
+    return counts

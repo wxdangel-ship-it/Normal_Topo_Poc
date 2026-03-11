@@ -190,6 +190,38 @@ def test_t04v01b_singleton_entry_clusters_merge_into_nearby_main_arms() -> None:
     assert member_count_by_arm[approach_index["intersection:100|south_east_entry:entry"].arm_id] >= 2
 
 
+def test_t04v01c_ambiguous_singleton_entry_cluster_stays_separate() -> None:
+    def polar_point(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return (round(radius * math.cos(rad), 6), round(radius * math.sin(rad), 6))
+
+    def ray(angle_deg: float, *, radius: float = 1.0, length: float = 10.0) -> list[tuple[float, float]]:
+        start_x, start_y = polar_point(angle_deg, radius)
+        end_x, end_y = polar_point(angle_deg, radius + length)
+        return [(start_x, start_y), (end_x, end_y)]
+
+    node_specs = [
+        (1, 0.0),
+        (2, 90.0),
+        (3, 180.0),
+        (4, 270.0),
+        (5, 45.0),
+    ]
+    nodes = [_node(node_id, *polar_point(angle_deg), mainid=100) for node_id, angle_deg in node_specs]
+    roads = [
+        _road("east_main", ray(0.0), snodeid=1, enodeid=101, direction=1),
+        _road("north_main", ray(90.0), snodeid=2, enodeid=102, direction=1),
+        _road("west_main", ray(180.0), snodeid=3, enodeid=103, direction=1),
+        _road("south_main", ray(270.0), snodeid=4, enodeid=104, direction=1),
+        _road("ambiguous_entry", ray(45.0), snodeid=5, enodeid=105, direction=3),
+    ]
+
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    assert len(bundle.arms) == 5
+    ambiguous_arm = bundle.approach_index["intersection:100|ambiguous_entry:entry"].arm_id
+    assert len(bundle.arm_index[ambiguous_arm].member_approach_ids) == 1
+
+
 def test_t04v02_single_parallel_cross_defaults_unknown() -> None:
     nodes = [_node(1, 0.0, -1.0), _node(2, 2.0, -1.0), _node(3, 0.0, 1.0), _node(4, 2.0, 1.0)]
     roads = [
@@ -228,6 +260,42 @@ def test_t04v03_non_core_parallel_through_allowed() -> None:
     result = decisions[("south_aux:entry", "north_aux:exit")]
     assert result.status == "allowed"
     assert result.reason_codes == ("DEFAULT_THROUGH_ALLOWED",)
+
+
+def test_t04v03b_single_source_parallel_target_through_allowed() -> None:
+    nodes = [_node(1, 0.0, -1.0), _node(2, 0.0, 1.0), _node(3, 2.0, 1.0)]
+    roads = [
+        _road("south_main", [(0.0, -1.0), (0.0, -10.0)], snodeid=1, enodeid=101),
+        _road("north_main", [(0.0, 1.0), (0.0, 10.0)], snodeid=2, enodeid=102),
+        _road("north_aux", [(2.0, 1.0), (2.0, 10.0)], snodeid=3, enodeid=103),
+    ]
+    overrides = {
+        "north_main:exit": {"exit_leg_role": "core_standard_exit"},
+        "north_aux:exit": {"exit_leg_role": "service_standard_exit"},
+    }
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads, approach_overrides=overrides)[0]
+    decisions = _decision_map(evaluate_bundle(bundle))
+    result = decisions[("south_main:entry", "north_aux:exit")]
+    assert result.status == "allowed"
+    assert result.reason_codes == ("DEFAULT_THROUGH_ALLOWED",)
+
+
+def test_t04v03c_single_source_parallel_target_right_allowed() -> None:
+    nodes = [_node(1, 0.0, -1.0), _node(2, 1.0, 0.0), _node(3, 1.0, 2.0)]
+    roads = [
+        _road("south_main", [(0.0, -1.0), (0.0, -10.0)], snodeid=1, enodeid=101),
+        _road("east_main", [(1.0, 0.0), (10.0, 0.0)], snodeid=2, enodeid=102),
+        _road("east_aux", [(1.0, 2.0), (10.0, 2.0)], snodeid=3, enodeid=103),
+    ]
+    overrides = {
+        "east_main:exit": {"exit_leg_role": "core_standard_exit"},
+        "east_aux:exit": {"exit_leg_role": "service_standard_exit"},
+    }
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads, approach_overrides=overrides)[0]
+    decisions = _decision_map(evaluate_bundle(bundle))
+    result = decisions[("south_main:entry", "east_aux:exit")]
+    assert result.status == "allowed"
+    assert result.reason_codes == ("DEFAULT_RIGHT_ALLOWED",)
 
 
 def test_t04v05_non_standard_exit_forbidden() -> None:
