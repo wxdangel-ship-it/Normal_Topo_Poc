@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--crop-buffer-m",
         type=float,
         default=DEFAULT_CROP_BUFFER_M,
-        help="BBox padding used only when exporting cropped RCSDNode/RCSDRoad for visual inspection",
+        help="Base buffer used for visual crop; roads keep one extra buffer band beyond the node crop",
     )
     parser.add_argument("--crop-inputs-only", action="store_true", help="Export cropped RCSDNode/RCSDRoad and exit")
     parser.add_argument("--emit-review-bundle", action="store_true", help="Write run result + catalog + template + review outputs")

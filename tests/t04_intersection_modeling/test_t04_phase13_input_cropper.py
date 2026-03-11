@@ -90,6 +90,7 @@ def test_phase13_export_cropped_inputs_from_geojson_files_writes_visual_files(tm
         [
             _node(1, 0.0, 0.0, mainid=100),
             _node(2, 0.0, 10.0, mainid=100),
+            _node(4, 4.0, 4.0, mainid=999),
             _node(3, 100.0, 100.0, mainid=200),
         ],
     )
@@ -122,14 +123,18 @@ def test_phase13_export_cropped_inputs_from_geojson_files_writes_visual_files(tm
     summary = json.loads((output_dir / "crop_summary.json").read_text(encoding="utf-8"))
     assert summary["mainid"] == 100
     assert summary["cropped_node_count"] == 2
+    assert summary["road_crop_buffer_m"] == 5.0
     assert summary["cropped_road_ids"] == ["south", "north"]
+
+    node_payload = json.loads((output_dir / "RCSDNode.geojson").read_text(encoding="utf-8"))
+    assert sorted(feature["properties"]["id"] for feature in node_payload["features"]) == [1, 2]
 
     road_payload = json.loads((output_dir / "RCSDRoad.geojson").read_text(encoding="utf-8"))
     assert len(road_payload["features"]) == 2
     for feature in road_payload["features"]:
         assert feature["geometry"]["type"] == "LineString"
         for _x, y in feature["geometry"]["coordinates"]:
-            assert -5.0 <= float(y) <= 15.0
+            assert -10.0 <= float(y) <= 20.0
 
 
 def test_phase13_crop_dataset_runner_writes_per_mainnodeid_outputs(tmp_path: Path) -> None:

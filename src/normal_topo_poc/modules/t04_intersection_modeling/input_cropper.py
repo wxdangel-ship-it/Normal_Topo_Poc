@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import GeometryCollection, LineString, MultiLineString, box, mapping
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPoint, box, mapping
 
 from .geojson_io import (
     discover_geojson_dataset_inputs,
@@ -26,6 +26,9 @@ class T04CroppedInputResult:
     mainid: Any
     available_mainids: tuple[Any, ...]
     crop_buffer_m: float
+    road_crop_buffer_m: float
+    node_crop_bounds: tuple[float, float, float, float]
+    road_crop_bounds: tuple[float, float, float, float]
     crop_bounds: tuple[float, float, float, float]
     selected_mainid_node_features: tuple[dict[str, Any], ...]
     cropped_node_features: tuple[dict[str, Any], ...]
@@ -77,48 +80,60 @@ def build_t04_cropped_inputs(
     if not selected_nodes:
         raise ValueError(f"selected_mainid_has_no_nodes:{selected_mainid}")
 
-    minx = min(node.point.x for node in selected_nodes) - float(crop_buffer_m)
-    miny = min(node.point.y for node in selected_nodes) - float(crop_buffer_m)
-    maxx = max(node.point.x for node in selected_nodes) + float(crop_buffer_m)
-    maxy = max(node.point.y for node in selected_nodes) + float(crop_buffer_m)
-    crop_box = box(minx, miny, maxx, maxy)
+    base_crop_buffer_m = float(crop_buffer_m)
+    node_crop_region = MultiPoint([node.point for node in selected_nodes]).convex_hull.buffer(base_crop_buffer_m)
+    road_crop_buffer_m = base_crop_buffer_m
+    road_crop_region = node_crop_region.buffer(road_crop_buffer_m)
+    node_crop_bounds = tuple(float(value) for value in node_crop_region.bounds)
+    road_crop_bounds = tuple(float(value) for value in road_crop_region.bounds)
+    road_crop_box = box(*road_crop_bounds)
 
     normalized_nodes = normalize_node_features(node_features)
-    cropped_node_features = tuple(
-        _copy_feature(feature)
-        for feature, normalized in zip(node_features, normalized_nodes)
-        if normalized.point.intersects(crop_box)
-    )
-
     selected_node_ids = {node.node_id for node in selected_nodes}
     normalized_roads = normalize_road_features(road_features)
     cropped_roads: list[dict[str, Any]] = []
+    connected_node_ids = set(selected_node_ids)
     for feature, normalized in zip(road_features, normalized_roads):
         if normalized.snodeid not in selected_node_ids and normalized.enodeid not in selected_node_ids:
             continue
-        if not normalized.line.intersects(crop_box):
+        if not normalized.line.intersects(road_crop_region):
             continue
-        clipped_geometry = _clip_line_geometry(normalized.line.intersection(crop_box))
+        clipped_geometry = _clip_line_geometry(normalized.line.intersection(road_crop_region))
         if clipped_geometry is None:
             continue
         feature_copy = _copy_feature(feature)
         feature_copy["geometry"] = mapping(clipped_geometry)
         cropped_roads.append(feature_copy)
+        connected_node_ids.add(normalized.snodeid)
+        connected_node_ids.add(normalized.enodeid)
+
+    cropped_node_features = tuple(
+        _copy_feature(feature)
+        for feature, normalized in zip(node_features, normalized_nodes)
+        if normalized.node_id in selected_node_ids
+        or (normalized.node_id in connected_node_ids and normalized.point.intersects(road_crop_region))
+    )
 
     bbox_feature = {
         "type": "Feature",
-        "geometry": mapping(crop_box),
+        "geometry": mapping(road_crop_box),
         "properties": {
             "mainid": selected_mainid,
-            "crop_buffer_m": float(crop_buffer_m),
+            "crop_buffer_m": base_crop_buffer_m,
+            "road_crop_buffer_m": road_crop_buffer_m,
+            "node_crop_bounds": list(node_crop_bounds),
+            "road_crop_bounds": list(road_crop_bounds),
         },
     }
 
     return T04CroppedInputResult(
         mainid=selected_mainid,
         available_mainids=tuple(available_mainids),
-        crop_buffer_m=float(crop_buffer_m),
-        crop_bounds=(float(minx), float(miny), float(maxx), float(maxy)),
+        crop_buffer_m=base_crop_buffer_m,
+        road_crop_buffer_m=road_crop_buffer_m,
+        node_crop_bounds=node_crop_bounds,
+        road_crop_bounds=road_crop_bounds,
+        crop_bounds=road_crop_bounds,
         selected_mainid_node_features=tuple(_copy_feature(feature) for feature in selected_node_features),
         cropped_node_features=cropped_node_features,
         cropped_road_features=tuple(cropped_roads),
@@ -270,6 +285,9 @@ def build_t04_cropped_input_summary(result: T04CroppedInputResult) -> dict[str, 
         "mainid": result.mainid,
         "available_mainids": list(result.available_mainids),
         "crop_buffer_m": result.crop_buffer_m,
+        "road_crop_buffer_m": result.road_crop_buffer_m,
+        "node_crop_bounds": list(result.node_crop_bounds),
+        "road_crop_bounds": list(result.road_crop_bounds),
         "crop_bounds": list(result.crop_bounds),
         "selected_mainid_node_count": len(result.selected_mainid_node_features),
         "cropped_node_count": len(result.cropped_node_features),
@@ -352,6 +370,9 @@ def _build_t04_cropped_input_summary_text(result: T04CroppedInputResult) -> str:
         f"mainid: {payload['mainid']}",
         f"available_mainids: {','.join(str(item) for item in payload['available_mainids'])}",
         f"crop_buffer_m: {payload['crop_buffer_m']}",
+        f"road_crop_buffer_m: {payload['road_crop_buffer_m']}",
+        f"node_crop_bounds: {payload['node_crop_bounds']}",
+        f"road_crop_bounds: {payload['road_crop_bounds']}",
         f"crop_bounds: {payload['crop_bounds']}",
         f"selected_mainid_node_count: {payload['selected_mainid_node_count']}",
         f"cropped_node_count: {payload['cropped_node_count']}",
