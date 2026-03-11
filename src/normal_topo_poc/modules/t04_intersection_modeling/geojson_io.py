@@ -156,7 +156,7 @@ def select_single_intersection_node_features(
     selected_node_ids = {node.node_id for node in normalized_nodes if node.mainid == selected_mainid}
     selected_features = [
         feature
-        for feature, normalized in zip(node_features, normalized_nodes, strict=True)
+        for feature, normalized in zip(node_features, normalized_nodes)
         if normalized.node_id in selected_node_ids
     ]
     return selected_features, selected_mainid, available_mainids

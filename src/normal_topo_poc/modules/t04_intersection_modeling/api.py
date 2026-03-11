@@ -66,7 +66,7 @@ def run_t04_manual_mode(
         decisions = tuple(evaluate_bundle(bundle))
         movement_results = tuple(
             serialize_movement_result(candidate, decision)
-            for candidate, decision in zip(bundle.movements, decisions, strict=True)
+            for candidate, decision in zip(bundle.movements, decisions)
         )
         results.append(
             T04RunResult(

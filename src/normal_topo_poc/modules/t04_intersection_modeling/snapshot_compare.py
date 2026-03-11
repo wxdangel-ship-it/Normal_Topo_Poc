@@ -66,7 +66,7 @@ def _compare_json_values(actual: Any, expected: Any, *, path: str) -> None:
             raise ValueError(
                 f"snapshot_compare_list_length_mismatch:{path}:expected={len(expected)}:actual={len(actual)}"
             )
-        for idx, (actual_item, expected_item) in enumerate(zip(actual, expected, strict=True)):
+        for idx, (actual_item, expected_item) in enumerate(zip(actual, expected)):
             _compare_json_values(actual_item, expected_item, path=f"{path}[{idx}]")
         return
     if actual != expected:

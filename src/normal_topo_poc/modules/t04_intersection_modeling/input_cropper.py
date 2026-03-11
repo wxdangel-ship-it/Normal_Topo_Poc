@@ -86,14 +86,14 @@ def build_t04_cropped_inputs(
     normalized_nodes = normalize_node_features(node_features)
     cropped_node_features = tuple(
         _copy_feature(feature)
-        for feature, normalized in zip(node_features, normalized_nodes, strict=True)
+        for feature, normalized in zip(node_features, normalized_nodes)
         if normalized.point.intersects(crop_box)
     )
 
     selected_node_ids = {node.node_id for node in selected_nodes}
     normalized_roads = normalize_road_features(road_features)
     cropped_roads: list[dict[str, Any]] = []
-    for feature, normalized in zip(road_features, normalized_roads, strict=True):
+    for feature, normalized in zip(road_features, normalized_roads):
         if normalized.snodeid not in selected_node_ids and normalized.enodeid not in selected_node_ids:
             continue
         if not normalized.line.intersects(crop_box):
