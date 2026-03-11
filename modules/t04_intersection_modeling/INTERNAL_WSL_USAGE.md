@@ -1,20 +1,20 @@
 ﻿# T04 Internal WSL Usage
 
 内网 WSL 运行时，请显式传入：
-- `--dataset-dir`
 - `--mainnodeid`
 
 推荐脚本：
+- [scripts/run_t04_sh_module.sh](E:/Work/Normal_Topo_Poc/scripts/run_t04_sh_module.sh)
 - [scripts/run_t04_sh_manual_mode.sh](E:/Work/Normal_Topo_Poc/scripts/run_t04_sh_manual_mode.sh)
 
 已知内网数据目录示例：
-- Windows: `D:\TestData\normal_topo_poc_data\Intersection\SH`
-- WSL: `/mnt/d/TestData/normal_topo_poc_data/Intersection/SH`
+- Windows: `D:\TestData\highway_topo_poc_data\Intersection\SH`
+- WSL: `/mnt/d/TestData/highway_topo_poc_data/Intersection/SH`
 
 先更新主干，再运行：
 
 ```bash
-cd /mnt/e/Work/Normal_Topo_Poc
+cd /mnt/d/Work/Normal_Topo_Poc
 git fetch origin --prune
 git switch main
 git pull --ff-only origin main
@@ -23,30 +23,27 @@ git pull --ff-only origin main
 最小执行：
 
 ```bash
-cd /mnt/e/Work/Normal_Topo_Poc
-bash scripts/run_t04_sh_manual_mode.sh \
-  --dataset-dir /mnt/d/TestData/normal_topo_poc_data/Intersection/SH \
+cd /mnt/d/Work/Normal_Topo_Poc
+bash scripts/run_t04_sh_module.sh \
   --mainnodeid 12113465
 ```
 
 多个 `mainnodeid`：
 
 ```bash
-cd /mnt/e/Work/Normal_Topo_Poc
-bash scripts/run_t04_sh_manual_mode.sh \
-  --dataset-dir /mnt/d/TestData/normal_topo_poc_data/Intersection/SH \
+cd /mnt/d/Work/Normal_Topo_Poc
+bash scripts/run_t04_sh_module.sh \
   --mainnodeid 12113465 12113466
 ```
 
 带 override：
 
 ```bash
-cd /mnt/e/Work/Normal_Topo_Poc
-bash scripts/run_t04_sh_manual_mode.sh \
-  --dataset-dir /mnt/d/TestData/normal_topo_poc_data/Intersection/SH \
+cd /mnt/d/Work/Normal_Topo_Poc
+bash scripts/run_t04_sh_module.sh \
   --mainnodeid 12113465 \
   --manual-override /mnt/d/path/to/12113465.json \
-  --output-root /mnt/e/Work/Normal_Topo_Poc/outputs/_work/t04_intersection_modeling/sh_manual_mode_real
+  --output-root /mnt/d/Work/Normal_Topo_Poc/outputs/_work/t04_intersection_modeling/sh_manual_mode_real
 ```
 
 override 约定：
