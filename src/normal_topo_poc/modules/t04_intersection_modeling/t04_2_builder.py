@@ -338,15 +338,7 @@ def _assign_arms(
     approaches: list[ApproachModel],
 ) -> tuple[list[ArmModel], list[ApproachModel]]:
     approach_by_id = {approach.approach_id: approach for approach in approaches}
-    clusters: list[dict[str, Any]] = []
-    for approach in sorted(approaches, key=lambda item: (item.side_angle_deg, item.approach_id)):
-        best_idx = _best_cluster_index(approach.side_angle_deg, clusters)
-        if best_idx is None:
-            clusters.append({"angles": [approach.side_angle_deg], "members": [approach.approach_id]})
-        else:
-            clusters[best_idx]["angles"].append(approach.side_angle_deg)
-            clusters[best_idx]["members"].append(approach.approach_id)
-
+    clusters = _build_contiguous_arm_clusters(approaches)
     clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
 
     arms: list[ArmModel] = []
@@ -369,15 +361,28 @@ def _assign_arms(
     return arms, updated
 
 
-def _best_cluster_index(angle: float, clusters: list[dict[str, Any]]) -> int | None:
-    best_idx: int | None = None
-    best_diff = 999.0
-    for idx, cluster in enumerate(clusters):
-        diff = circular_diff_deg(angle, _mean_angle_deg(cluster["angles"]))
-        if diff <= _ARM_CLUSTER_DEG and diff < best_diff:
-            best_idx = idx
-            best_diff = diff
-    return best_idx
+def _build_contiguous_arm_clusters(approaches: list[ApproachModel]) -> list[dict[str, Any]]:
+    ordered = sorted(approaches, key=lambda item: (item.side_angle_deg, item.approach_id))
+    if not ordered:
+        return []
+
+    clusters: list[dict[str, Any]] = [{"angles": [ordered[0].side_angle_deg], "members": [ordered[0].approach_id]}]
+    for prev, current in zip(ordered, ordered[1:]):
+        gap = float(current.side_angle_deg - prev.side_angle_deg)
+        if gap <= _ARM_CLUSTER_DEG:
+            clusters[-1]["angles"].append(current.side_angle_deg)
+            clusters[-1]["members"].append(current.approach_id)
+            continue
+        clusters.append({"angles": [current.side_angle_deg], "members": [current.approach_id]})
+
+    if len(clusters) >= 2:
+        wrap_gap = float((ordered[0].side_angle_deg + 360.0) - ordered[-1].side_angle_deg)
+        if wrap_gap <= _ARM_CLUSTER_DEG:
+            first = clusters.pop(0)
+            clusters[-1]["angles"].extend(first["angles"])
+            clusters[-1]["members"].extend(first["members"])
+
+    return clusters
 
 
 def _merge_singleton_one_side_clusters(
@@ -388,6 +393,9 @@ def _merge_singleton_one_side_clusters(
     merged = [{"angles": list(cluster["angles"]), "members": list(cluster["members"])} for cluster in clusters]
     while True:
         best_pair: tuple[float, int, int] | None = None
+        cluster_count = len(merged)
+        if cluster_count <= 1:
+            return merged
         for idx, cluster in enumerate(merged):
             if len(cluster["members"]) != 1:
                 continue
@@ -396,8 +404,9 @@ def _merge_singleton_one_side_clusters(
                 continue
             cluster_angle = _mean_angle_deg(cluster["angles"])
             candidate_targets: list[tuple[float, int]] = []
-            for target_idx, target in enumerate(merged):
-                if target_idx == idx or len(target["members"]) < 2:
+            for target_idx in _neighbor_cluster_indices(idx, cluster_count):
+                target = merged[target_idx]
+                if len(target["members"]) < 2:
                     continue
                 diff = circular_diff_deg(cluster_angle, _mean_angle_deg(target["angles"]))
                 if diff > _ARM_SINGLETON_MERGE_DEG:
@@ -418,14 +427,45 @@ def _merge_singleton_one_side_clusters(
             return merged
 
         _diff, source_idx, target_idx = best_pair
-        if source_idx < target_idx:
-            source_cluster = merged.pop(source_idx)
-            target_cluster = merged[target_idx - 1]
-        else:
-            source_cluster = merged.pop(source_idx)
-            target_cluster = merged[target_idx]
+        _merge_adjacent_clusters(merged, source_idx=source_idx, target_idx=target_idx)
+
+
+def _neighbor_cluster_indices(cluster_idx: int, cluster_count: int) -> tuple[int, ...]:
+    if cluster_count <= 1:
+        return ()
+    prev_idx = (cluster_idx - 1) % cluster_count
+    next_idx = (cluster_idx + 1) % cluster_count
+    if prev_idx == next_idx:
+        return (prev_idx,)
+    return (prev_idx, next_idx)
+
+
+def _merge_adjacent_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    source_idx: int,
+    target_idx: int,
+) -> None:
+    if source_idx == target_idx:
+        return
+    cluster_count = len(clusters)
+    prev_idx = (source_idx - 1) % cluster_count
+    next_idx = (source_idx + 1) % cluster_count
+    if target_idx not in {prev_idx, next_idx}:
+        raise ValueError("arm_merge_target_must_be_adjacent")
+
+    source_cluster = clusters[source_idx]
+    if target_idx == prev_idx:
+        target_cluster = clusters[target_idx]
         target_cluster["angles"].extend(source_cluster["angles"])
         target_cluster["members"].extend(source_cluster["members"])
+        del clusters[source_idx]
+        return
+
+    target_cluster = clusters[target_idx]
+    target_cluster["angles"] = [*source_cluster["angles"], *target_cluster["angles"]]
+    target_cluster["members"] = [*source_cluster["members"], *target_cluster["members"]]
+    del clusters[source_idx]
 
 
 def _cluster_movement_sides(

@@ -222,6 +222,43 @@ def test_t04v01c_ambiguous_singleton_entry_cluster_stays_separate() -> None:
     assert len(bundle.arm_index[ambiguous_arm].member_approach_ids) == 1
 
 
+def test_t04v01d_contiguous_entry_exit_block_stays_single_arm() -> None:
+    def polar_point(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return (round(radius * math.cos(rad), 6), round(radius * math.sin(rad), 6))
+
+    def ray(angle_deg: float, *, radius: float = 1.0, length: float = 10.0) -> list[tuple[float, float]]:
+        start_x, start_y = polar_point(angle_deg, radius)
+        end_x, end_y = polar_point(angle_deg, radius + length)
+        return [(start_x, start_y), (end_x, end_y)]
+
+    node_specs = [
+        (1, 20.0),
+        (2, 30.0),
+        (3, 40.0),
+        (4, 50.0),
+        (5, 120.0),
+        (6, 130.0),
+    ]
+    nodes = [_node(node_id, *polar_point(angle_deg), mainid=100) for node_id, angle_deg in node_specs]
+    roads = [
+        _road("arm_a_entry_low", ray(20.0), snodeid=1, enodeid=101, direction=3),
+        _road("arm_a_exit_low", ray(30.0), snodeid=2, enodeid=102, direction=2),
+        _road("arm_a_exit_high", ray(40.0), snodeid=3, enodeid=103, direction=2),
+        _road("arm_a_entry_high", ray(50.0), snodeid=4, enodeid=104, direction=3),
+        _road("arm_b_entry", ray(120.0), snodeid=5, enodeid=105, direction=3),
+        _road("arm_b_exit", ray(130.0), snodeid=6, enodeid=106, direction=2),
+    ]
+
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    assert len(bundle.arms) == 2
+    arm_a_low = bundle.approach_index["intersection:100|arm_a_entry_low:entry"].arm_id
+    arm_a_high = bundle.approach_index["intersection:100|arm_a_entry_high:entry"].arm_id
+    arm_b_entry = bundle.approach_index["intersection:100|arm_b_entry:entry"].arm_id
+    assert arm_a_low == arm_a_high
+    assert arm_a_low != arm_b_entry
+
+
 def test_t04v02_single_parallel_cross_defaults_unknown() -> None:
     nodes = [_node(1, 0.0, -1.0), _node(2, 2.0, -1.0), _node(3, 0.0, 1.0), _node(4, 2.0, 1.0)]
     roads = [
