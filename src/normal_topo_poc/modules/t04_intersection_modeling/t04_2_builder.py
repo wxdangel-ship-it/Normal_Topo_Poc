@@ -60,6 +60,7 @@ _ARM_CLUSTER_DEG = 40.0
 _ARM_SINGLETON_MERGE_DEG = 50.0
 _ARM_SINGLETON_CLEAR_GAP_DEG = 7.0
 _ARM_SPECIAL_SIDE_CLEAR_GAP_DEG = 10.0
+_ARM_SPECIAL_SIDE_ATTACH_DEG = 60.0
 
 _SPECIAL_COMPANION_ENTRY_PROFILES = {
     "left_uturn_service",
@@ -151,11 +152,9 @@ def _build_bundles(
             node_by_id=node_by_id,
             approach_overrides=approach_overrides,
         )
-        arms, approaches = _assign_arms(
+        provisional_arms, approaches = _assign_provisional_arms(
             intersection=intersection,
             approaches=approaches,
-            incident_roads=incident_roads,
-            group_node_ids=group_node_ids,
         )
         approaches = _apply_lateral_ranks(approaches)
         approaches = _apply_entry_defaults(approaches)
@@ -165,6 +164,14 @@ def _build_bundles(
             manual_paired_mainline_map=manual_paired_mainline_map,
         )
         approaches = apply_placeholder_paired_mainline_detection(approaches)
+        arms, approaches = _assign_arms(
+            intersection=intersection,
+            approaches=approaches,
+            incident_roads=incident_roads,
+            group_node_ids=group_node_ids,
+            provisional_arms=provisional_arms,
+        )
+        approaches = _apply_lateral_ranks(approaches)
         approaches = _apply_exit_defaults(approaches)
         movements = _build_movements(intersection=intersection, approaches=approaches, arms=arms)
         bundles.append(
@@ -379,12 +386,28 @@ def _far_node_id_for_road(
     return None
 
 
+def _assign_provisional_arms(
+    *,
+    intersection: IntersectionModel,
+    approaches: list[ApproachModel],
+) -> tuple[list[ArmModel], list[ApproachModel]]:
+    approach_by_id = {approach.approach_id: approach for approach in approaches}
+    clusters = _build_contiguous_arm_clusters(approaches, approach_by_id=approach_by_id)
+    clusters = [_sorted_cluster(cluster, approach_by_id=approach_by_id) for cluster in clusters]
+    return _materialize_arm_clusters(
+        intersection=intersection,
+        approaches=approaches,
+        clusters=clusters,
+    )
+
+
 def _assign_arms(
     *,
     intersection: IntersectionModel,
     approaches: list[ApproachModel],
     incident_roads: list[NormalizedRoad],
     group_node_ids: set[Any],
+    provisional_arms: list[ArmModel],
 ) -> tuple[list[ArmModel], list[ApproachModel]]:
     approach_by_id = {approach.approach_id: approach for approach in approaches}
     road_by_id = {road.road_id: road for road in incident_roads}
@@ -393,44 +416,27 @@ def _assign_arms(
         road_by_id=road_by_id,
         group_node_ids=group_node_ids,
     )
-    clusters = _build_contiguous_arm_clusters(approaches, approach_by_id=approach_by_id)
-    clusters = _merge_far_node_linked_clusters(
-        clusters,
-        far_node_by_approach=far_node_by_approach,
+    ordered_nodes = _ordered_attached_nodes(approaches, approach_by_id=approach_by_id)
+    if not ordered_nodes:
+        return ([], [])
+
+    provisional_arm_by_id = {arm.arm_id: arm for arm in provisional_arms}
+    seed_entries = _select_final_arm_seed_entries(
+        approaches=approaches,
+        provisional_arm_by_id=provisional_arm_by_id,
     )
-    clusters = _merge_special_side_required_clusters(
-        clusters,
+    clusters = _build_seed_partition_clusters(
+        ordered_nodes=ordered_nodes,
         approach_by_id=approach_by_id,
-    )
-    clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
-    clusters = _merge_far_node_linked_clusters(
-        clusters,
         far_node_by_approach=far_node_by_approach,
-    )
-    clusters = _merge_special_side_required_clusters(
-        clusters,
-        approach_by_id=approach_by_id,
+        seed_entries=seed_entries,
     )
     clusters = [_sorted_cluster(cluster, approach_by_id=approach_by_id) for cluster in clusters]
-
-    arms: list[ArmModel] = []
-    arm_id_by_approach: dict[str, str] = {}
-    for idx, cluster in enumerate(clusters):
-        arm_id = f"{intersection.intersection_id}|arm:{idx}"
-        for approach_id in cluster["members"]:
-            arm_id_by_approach[approach_id] = arm_id
-        arms.append(
-            ArmModel(
-                arm_id=arm_id,
-                intersection_id=intersection.intersection_id,
-                member_approach_ids=tuple(cluster["members"]),
-                arm_heading_group=f"group_{idx}",
-                representative_angle_deg=_mean_angle_deg(cluster["angles"]),
-                remarks=("TODO: arm_heading_group remains abstract; no absolute NSEW binding in MVP",),
-            )
-        )
-    updated = [replace(approach, arm_id=arm_id_by_approach[approach.approach_id]) for approach in approaches]
-    return arms, updated
+    return _materialize_arm_clusters(
+        intersection=intersection,
+        approaches=approaches,
+        clusters=clusters,
+    )
 
 
 def _build_contiguous_arm_clusters(
@@ -520,6 +526,317 @@ def _attached_node_centroid(node_points: dict[Any, Point]) -> tuple[float, float
         float(sum(point.x for point in points) / len(points)),
         float(sum(point.y for point in points) / len(points)),
     )
+
+
+def _materialize_arm_clusters(
+    *,
+    intersection: IntersectionModel,
+    approaches: list[ApproachModel],
+    clusters: list[dict[str, Any]],
+) -> tuple[list[ArmModel], list[ApproachModel]]:
+    arms: list[ArmModel] = []
+    arm_id_by_approach: dict[str, str] = {}
+    for idx, cluster in enumerate(clusters):
+        arm_id = f"{intersection.intersection_id}|arm:{idx}"
+        for approach_id in cluster["members"]:
+            arm_id_by_approach[approach_id] = arm_id
+        arms.append(
+            ArmModel(
+                arm_id=arm_id,
+                intersection_id=intersection.intersection_id,
+                member_approach_ids=tuple(cluster["members"]),
+                arm_heading_group=f"group_{idx}",
+                representative_angle_deg=_mean_angle_deg(cluster["angles"]),
+                remarks=("TODO: arm_heading_group remains abstract; no absolute NSEW binding in MVP",),
+            )
+        )
+    updated = [replace(approach, arm_id=arm_id_by_approach[approach.approach_id]) for approach in approaches]
+    return (arms, updated)
+
+
+def _select_final_arm_seed_entries(
+    *,
+    approaches: list[ApproachModel],
+    provisional_arm_by_id: dict[str, ArmModel],
+) -> list[ApproachModel]:
+    provisional_side_counts = _count_approaches_by_arm_side(approaches)
+    seed_entries = [
+        approach
+        for approach in approaches
+        if _is_final_arm_seed_entry(
+            approach,
+            provisional_arm_by_id=provisional_arm_by_id,
+            provisional_side_counts=provisional_side_counts,
+        )
+    ]
+    if seed_entries:
+        return seed_entries
+    fallback_entries = [
+        approach
+        for approach in approaches
+        if approach.movement_side == "entry"
+        and approach.approach_profile not in _SPECIAL_COMPANION_ENTRY_PROFILES
+    ]
+    if fallback_entries:
+        return fallback_entries
+    return [approach for approach in approaches if approach.movement_side == "entry"]
+
+
+def _is_final_arm_seed_entry(
+    approach: ApproachModel,
+    *,
+    provisional_arm_by_id: dict[str, ArmModel],
+    provisional_side_counts: dict[tuple[str, str], int],
+) -> bool:
+    if approach.movement_side != "entry":
+        return False
+    if approach.approach_profile in _SPECIAL_COMPANION_ENTRY_PROFILES:
+        return False
+    if approach.approach_profile not in {"default_signalized", "unknown"}:
+        return False
+    if approach.is_core_signalized_approach is not True:
+        return False
+    provisional_arm = provisional_arm_by_id.get(approach.arm_id)
+    if provisional_arm is None:
+        return True
+    if provisional_side_counts.get((approach.arm_id, "exit"), 0) > 0:
+        return True
+    return len(provisional_arm.member_approach_ids) > 1
+
+
+def _build_seed_partition_clusters(
+    *,
+    ordered_nodes: list[dict[str, Any]],
+    approach_by_id: dict[str, ApproachModel],
+    far_node_by_approach: dict[str, Any | None],
+    seed_entries: list[ApproachModel],
+) -> list[dict[str, Any]]:
+    if not ordered_nodes:
+        return []
+
+    node_index_by_id = {
+        item["node_id"]: index
+        for index, item in enumerate(ordered_nodes)
+    }
+    parent = _build_node_component_parent(
+        ordered_nodes=ordered_nodes,
+        approach_by_id=approach_by_id,
+        far_node_by_approach=far_node_by_approach,
+    )
+    component_nodes: dict[Any, list[Any]] = defaultdict(list)
+    for node_id in node_index_by_id:
+        component_nodes[_uf_find(parent, node_id)].append(node_id)
+
+    seed_node_ids = [approach.node_id for approach in seed_entries if approach.node_id in node_index_by_id]
+    seed_roots = _stable_node_ids(
+        [_uf_find(parent, node_id) for node_id in seed_node_ids]
+    )
+    if not seed_roots:
+        seed_roots = _stable_node_ids(list(component_nodes.keys()))
+
+    seed_index_lists = {
+        root: sorted(node_index_by_id[node_id] for node_id in component_nodes[root])
+        for root in seed_roots
+    }
+    seed_rank_by_root = {root: rank for rank, root in enumerate(seed_roots)}
+    component_angles = {
+        root: [
+            angle
+        for node_id in component_nodes[root]
+        for angle in next(item["angles"] for item in ordered_nodes if item["node_id"] == node_id)
+        ]
+        for root in component_nodes
+    }
+    seed_root_by_provisional_arm: dict[str, Any] = {}
+    for seed_entry in seed_entries:
+        seed_root_by_provisional_arm.setdefault(seed_entry.arm_id, _uf_find(parent, seed_entry.node_id))
+    component_assignment: dict[Any, Any] = {}
+    total_nodes = len(ordered_nodes)
+    for root, component_node_ids in component_nodes.items():
+        if root in seed_index_lists:
+            component_assignment[root] = root
+            continue
+        provisional_arm_ids = _stable_node_ids(
+            [
+                approach_by_id[approach_id].arm_id
+                for node_id in component_node_ids
+                for approach_id in next(item["members"] for item in ordered_nodes if item["node_id"] == node_id)
+            ]
+        )
+        if len(provisional_arm_ids) == 1 and provisional_arm_ids[0] in seed_root_by_provisional_arm:
+            component_assignment[root] = seed_root_by_provisional_arm[provisional_arm_ids[0]]
+            continue
+        required_root = _select_required_seed_root(
+            component_node_ids=component_node_ids,
+            ordered_nodes=ordered_nodes,
+            approach_by_id=approach_by_id,
+            seed_angles_by_root={seed_root: component_angles[seed_root] for seed_root in seed_roots},
+        )
+        if required_root is not None:
+            component_assignment[root] = required_root
+            continue
+        attach_root = _select_clear_singleton_seed_root(
+            component_angles=component_angles[root],
+            seed_angles_by_root={seed_root: component_angles[seed_root] for seed_root in seed_roots},
+        )
+        component_assignment[root] = attach_root if attach_root is not None else root
+
+    node_assignment: dict[Any, Any] = {}
+    for root, component_node_ids in component_nodes.items():
+        for node_id in component_node_ids:
+            node_assignment[node_id] = component_assignment[root]
+
+    clusters_by_root: dict[Any, dict[str, Any]] = {}
+    for node_item in ordered_nodes:
+        node_id = node_item["node_id"]
+        arm_root = node_assignment[node_id]
+        cluster = clusters_by_root.setdefault(arm_root, {"members": [], "angles": []})
+        cluster["members"].extend(node_item["members"])
+        cluster["angles"].extend(node_item["angles"])
+
+    return list(clusters_by_root.values())
+
+
+def _build_node_component_parent(
+    *,
+    ordered_nodes: list[dict[str, Any]],
+    approach_by_id: dict[str, ApproachModel],
+    far_node_by_approach: dict[str, Any | None],
+) -> dict[Any, Any]:
+    parent = {item["node_id"]: item["node_id"] for item in ordered_nodes}
+    node_ids_by_far_node: dict[Any, list[Any]] = defaultdict(list)
+    for approach_id, far_node_id in far_node_by_approach.items():
+        if far_node_id is None:
+            continue
+        approach = approach_by_id[approach_id]
+        node_ids_by_far_node[far_node_id].append(approach.node_id)
+    for node_ids in node_ids_by_far_node.values():
+        unique_ids = _stable_node_ids(node_ids)
+        if len(unique_ids) < 2:
+            continue
+        anchor = unique_ids[0]
+        for node_id in unique_ids[1:]:
+            _uf_union(parent, anchor, node_id)
+    return parent
+
+
+def _nearest_seed_distance(node_index: int, seed_indexes: list[int], total_nodes: int) -> tuple[int, int]:
+    best: tuple[int, int] | None = None
+    for seed_index in seed_indexes:
+        clockwise = (seed_index - node_index) % total_nodes
+        counter_clockwise = (node_index - seed_index) % total_nodes
+        dist = min(clockwise, counter_clockwise)
+        candidate = (dist, clockwise)
+        if best is None or candidate < best:
+            best = candidate
+    if best is None:
+        return (total_nodes, total_nodes)
+    return best
+
+
+def _select_required_seed_root(
+    *,
+    component_node_ids: list[Any],
+    ordered_nodes: list[dict[str, Any]],
+    approach_by_id: dict[str, ApproachModel],
+    seed_angles_by_root: dict[Any, list[float]],
+) -> Any | None:
+    node_item_by_id = {item["node_id"]: item for item in ordered_nodes}
+    component_members = [
+        approach_by_id[approach_id]
+        for node_id in component_node_ids
+        for approach_id in node_item_by_id[node_id]["members"]
+    ]
+    entry_items = [item for item in component_members if item.movement_side == "entry"]
+    exit_items = [item for item in component_members if item.movement_side == "exit"]
+    if any(_requires_entry_companion(item) for item in entry_items) and len(entry_items) < 2:
+        return _select_clear_required_seed_root(
+            anchor_angles=[item.side_angle_deg for item in entry_items if _requires_entry_companion(item)],
+            seed_angles_by_root=seed_angles_by_root,
+        )
+    if any(_requires_exit_companion(item) for item in exit_items) and len(exit_items) < 2:
+        return _select_clear_required_seed_root(
+            anchor_angles=[item.side_angle_deg for item in exit_items if _requires_exit_companion(item)],
+            seed_angles_by_root=seed_angles_by_root,
+        )
+    return None
+
+
+def _select_clear_singleton_seed_root(
+    *,
+    component_angles: list[float],
+    seed_angles_by_root: dict[Any, list[float]],
+) -> Any | None:
+    if len(component_angles) != 1 or len(seed_angles_by_root) < 2:
+        return None
+    source_angle = component_angles[0]
+    candidates = sorted(
+        (
+            circular_diff_deg(source_angle, _mean_angle_deg(seed_angles)),
+            seed_root,
+        )
+        for seed_root, seed_angles in seed_angles_by_root.items()
+        if seed_angles
+    )
+    if not candidates:
+        return None
+    if len(candidates) >= 2 and candidates[1][0] - candidates[0][0] < _ARM_SINGLETON_CLEAR_GAP_DEG:
+        return None
+    return candidates[0][1]
+
+
+def _select_clear_required_seed_root(
+    *,
+    anchor_angles: list[float],
+    seed_angles_by_root: dict[Any, list[float]],
+) -> Any | None:
+    if not anchor_angles or not seed_angles_by_root:
+        return None
+    candidates = sorted(
+        (
+            _min_circular_diff(anchor_angles, seed_angles),
+            seed_root,
+        )
+        for seed_root, seed_angles in seed_angles_by_root.items()
+        if seed_angles
+    )
+    if not candidates:
+        return None
+    if candidates[0][0] > _ARM_SPECIAL_SIDE_ATTACH_DEG:
+        return None
+    if len(candidates) >= 2 and candidates[1][0] - candidates[0][0] < _ARM_SPECIAL_SIDE_CLEAR_GAP_DEG:
+        return None
+    return candidates[0][1]
+
+
+def _stable_node_ids(node_ids: list[Any]) -> list[Any]:
+    seen: set[Any] = set()
+    out: list[Any] = []
+    for node_id in node_ids:
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        out.append(node_id)
+    return out
+
+
+def _uf_find(parent: dict[Any, Any], item: Any) -> Any:
+    root = item
+    while parent[root] != root:
+        root = parent[root]
+    while parent[item] != item:
+        next_item = parent[item]
+        parent[item] = root
+        item = next_item
+    return root
+
+
+def _uf_union(parent: dict[Any, Any], left: Any, right: Any) -> None:
+    left_root = _uf_find(parent, left)
+    right_root = _uf_find(parent, right)
+    if left_root == right_root:
+        return
+    parent[right_root] = left_root
 
 
 def _build_far_node_by_approach(
