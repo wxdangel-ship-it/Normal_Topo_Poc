@@ -259,6 +259,78 @@ def test_t04v01d_contiguous_entry_exit_block_stays_single_arm() -> None:
     assert arm_a_low != arm_b_entry
 
 
+def test_t04v01e_shared_far_node_forces_same_arm() -> None:
+    def polar_point(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return (round(radius * math.cos(rad), 6), round(radius * math.sin(rad), 6))
+
+    def ray_to(point: tuple[float, float], target: tuple[float, float]) -> list[tuple[float, float]]:
+        return [point, target]
+
+    east = polar_point(0.0)
+    north = polar_point(90.0)
+    west_main = polar_point(180.0)
+    west_aux = polar_point(225.0)
+    south = polar_point(270.0)
+    west_far = (-10.0, 0.0)
+
+    nodes = [
+        _node(1, *east),
+        _node(2, *north),
+        _node(3, *west_main),
+        _node(4, *west_aux),
+        _node(5, *south),
+    ]
+    roads = [
+        _road("east_main", ray_to(east, (10.0, 0.0)), snodeid=1, enodeid=101, direction=1),
+        _road("north_main", ray_to(north, (0.0, 10.0)), snodeid=2, enodeid=102, direction=1),
+        _road("west_main", ray_to(west_main, west_far), snodeid=3, enodeid=103, direction=1),
+        _road("west_aux_exit", ray_to(west_aux, west_far), snodeid=4, enodeid=103, direction=2),
+        _road("south_main", ray_to(south, (0.0, -10.0)), snodeid=5, enodeid=104, direction=1),
+    ]
+
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    assert len(bundle.arms) == 4
+    assert (
+        bundle.approach_index["intersection:100|west_main:entry"].arm_id
+        == bundle.approach_index["intersection:100|west_aux_exit:exit"].arm_id
+    )
+
+
+def test_t04v01f_special_entry_requires_same_side_companion() -> None:
+    def polar_point(angle_deg: float, radius: float = 1.0) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return (round(radius * math.cos(rad), 6), round(radius * math.sin(rad), 6))
+
+    def ray(angle_deg: float, *, radius: float = 1.0, length: float = 10.0) -> list[tuple[float, float]]:
+        start_x, start_y = polar_point(angle_deg, radius)
+        end_x, end_y = polar_point(angle_deg, radius + length)
+        return [(start_x, start_y), (end_x, end_y)]
+
+    node_specs = [
+        (1, 0.0),
+        (2, 45.0),
+        (3, 90.0),
+        (4, 180.0),
+        (5, 270.0),
+    ]
+    nodes = [_node(node_id, *polar_point(angle_deg), mainid=100) for node_id, angle_deg in node_specs]
+    roads = [
+        _road("east_main", ray(0.0), snodeid=1, enodeid=101, direction=1),
+        _road("special_entry", ray(45.0), snodeid=2, enodeid=102, direction=3, extra_properties={"FormWay": 256}),
+        _road("north_exit_only", ray(90.0), snodeid=3, enodeid=103, direction=2),
+        _road("west_main", ray(180.0), snodeid=4, enodeid=104, direction=1),
+        _road("south_main", ray(270.0), snodeid=5, enodeid=105, direction=1),
+    ]
+
+    bundle = build_intersection_bundles(node_features=nodes, road_features=roads)[0]
+    assert len(bundle.arms) == 4
+    assert (
+        bundle.approach_index["intersection:100|special_entry:entry"].arm_id
+        == bundle.approach_index["intersection:100|east_main:entry"].arm_id
+    )
+
+
 def test_t04v02_single_parallel_cross_defaults_unknown() -> None:
     nodes = [_node(1, 0.0, -1.0), _node(2, 2.0, -1.0), _node(3, 0.0, 1.0), _node(4, 2.0, 1.0)]
     roads = [

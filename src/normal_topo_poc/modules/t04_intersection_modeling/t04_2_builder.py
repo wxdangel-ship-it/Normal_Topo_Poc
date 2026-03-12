@@ -59,6 +59,18 @@ _EXIT_ROLE_ALLOWED = {
 _ARM_CLUSTER_DEG = 40.0
 _ARM_SINGLETON_MERGE_DEG = 50.0
 _ARM_SINGLETON_CLEAR_GAP_DEG = 7.0
+_ARM_SPECIAL_SIDE_CLEAR_GAP_DEG = 10.0
+
+_SPECIAL_COMPANION_ENTRY_PROFILES = {
+    "left_uturn_service",
+    "paired_mainline_no_left_uturn",
+}
+
+_SPECIAL_COMPANION_EXIT_ROLES = {
+    "service_standard_exit",
+    "auxiliary_parallel_exit",
+    "access_exit",
+}
 
 
 def approach_key(road_id: str, movement_side: str) -> str:
@@ -139,7 +151,12 @@ def _build_bundles(
             node_by_id=node_by_id,
             approach_overrides=approach_overrides,
         )
-        arms, approaches = _assign_arms(intersection=intersection, approaches=approaches)
+        arms, approaches = _assign_arms(
+            intersection=intersection,
+            approaches=approaches,
+            incident_roads=incident_roads,
+            group_node_ids=group_node_ids,
+        )
         approaches = _apply_lateral_ranks(approaches)
         approaches = _apply_entry_defaults(approaches)
         approaches = apply_manual_service_maps(
@@ -186,6 +203,11 @@ def _build_approaches(
         side_angle = vector_angle_deg(*away_vec)
         trend_angle = vector_angle_deg(*trend_vec)
         raw_formway = find_raw_formway_value(raw_properties=road.raw_properties)
+        far_node_id = _far_node_id_for_road(
+            road=road,
+            attached_node_id=attached_node_id,
+            group_node_ids=group_node_ids,
+        )
 
         for movement_side in _movement_sides_for_road(road=road, group_node_ids=group_node_ids):
             travel_angle = vector_angle_deg(*_travel_vector(away_vec=away_vec, movement_side=movement_side))
@@ -251,7 +273,15 @@ def _build_approaches(
                     travel_angle_deg=travel_angle,
                     lateral_rank=None,
                     geometry_ref=NormalizedGeometryRef(point=node.point, line=road.line),
-                    evidence_refs=(f"road:{road.road_id}", f"node:{attached_node_id}"),
+                    evidence_refs=tuple(
+                        ref
+                        for ref in (
+                            f"road:{road.road_id}",
+                            f"node:{attached_node_id}",
+                            f"far_node:{far_node_id}" if far_node_id is not None else None,
+                        )
+                        if ref is not None
+                    ),
                     remarks=tuple(remarks),
                 )
             )
@@ -332,14 +362,55 @@ def _travel_vector(*, away_vec: tuple[float, float], movement_side: str) -> tupl
     return (ax, ay)
 
 
+def _far_node_id_for_road(
+    *,
+    road: NormalizedRoad,
+    attached_node_id: Any,
+    group_node_ids: set[Any],
+) -> Any | None:
+    if road.snodeid == attached_node_id and road.enodeid not in group_node_ids:
+        return road.enodeid
+    if road.enodeid == attached_node_id and road.snodeid not in group_node_ids:
+        return road.snodeid
+    if road.snodeid in group_node_ids and road.enodeid not in group_node_ids:
+        return road.enodeid
+    if road.enodeid in group_node_ids and road.snodeid not in group_node_ids:
+        return road.snodeid
+    return None
+
+
 def _assign_arms(
     *,
     intersection: IntersectionModel,
     approaches: list[ApproachModel],
+    incident_roads: list[NormalizedRoad],
+    group_node_ids: set[Any],
 ) -> tuple[list[ArmModel], list[ApproachModel]]:
     approach_by_id = {approach.approach_id: approach for approach in approaches}
+    road_by_id = {road.road_id: road for road in incident_roads}
+    far_node_by_approach = _build_far_node_by_approach(
+        approaches=approaches,
+        road_by_id=road_by_id,
+        group_node_ids=group_node_ids,
+    )
     clusters = _build_contiguous_arm_clusters(approaches, approach_by_id=approach_by_id)
+    clusters = _merge_far_node_linked_clusters(
+        clusters,
+        far_node_by_approach=far_node_by_approach,
+    )
+    clusters = _merge_special_side_required_clusters(
+        clusters,
+        approach_by_id=approach_by_id,
+    )
     clusters = _merge_singleton_one_side_clusters(clusters, approach_by_id=approach_by_id)
+    clusters = _merge_far_node_linked_clusters(
+        clusters,
+        far_node_by_approach=far_node_by_approach,
+    )
+    clusters = _merge_special_side_required_clusters(
+        clusters,
+        approach_by_id=approach_by_id,
+    )
     clusters = [_sorted_cluster(cluster, approach_by_id=approach_by_id) for cluster in clusters]
 
     arms: list[ArmModel] = []
@@ -448,6 +519,180 @@ def _attached_node_centroid(node_points: dict[Any, Point]) -> tuple[float, float
     return (
         float(sum(point.x for point in points) / len(points)),
         float(sum(point.y for point in points) / len(points)),
+    )
+
+
+def _build_far_node_by_approach(
+    *,
+    approaches: list[ApproachModel],
+    road_by_id: dict[str, NormalizedRoad],
+    group_node_ids: set[Any],
+) -> dict[str, Any | None]:
+    far_node_by_approach: dict[str, Any | None] = {}
+    for approach in approaches:
+        road = road_by_id.get(approach.road_id)
+        if road is None:
+            far_node_by_approach[approach.approach_id] = None
+            continue
+        far_node_by_approach[approach.approach_id] = _far_node_id_for_road(
+            road=road,
+            attached_node_id=approach.node_id,
+            group_node_ids=group_node_ids,
+        )
+    return far_node_by_approach
+
+
+def _merge_far_node_linked_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    far_node_by_approach: dict[str, Any | None],
+) -> list[dict[str, Any]]:
+    merged = [{"angles": list(cluster["angles"]), "members": list(cluster["members"])} for cluster in clusters]
+    while True:
+        cluster_count = len(merged)
+        if cluster_count <= 1:
+            return merged
+        merged_pair: tuple[int, int] | None = None
+        for idx in range(cluster_count):
+            next_idx = (idx + 1) % cluster_count
+            if idx == next_idx:
+                continue
+            if _clusters_share_far_node(
+                merged[idx],
+                merged[next_idx],
+                far_node_by_approach=far_node_by_approach,
+            ):
+                merged_pair = (next_idx, idx)
+                break
+        if merged_pair is None:
+            return merged
+        source_idx, target_idx = merged_pair
+        _merge_adjacent_clusters(merged, source_idx=source_idx, target_idx=target_idx)
+
+
+def _clusters_share_far_node(
+    left_cluster: dict[str, Any],
+    right_cluster: dict[str, Any],
+    *,
+    far_node_by_approach: dict[str, Any | None],
+) -> bool:
+    left_far_nodes = {
+        far_node_by_approach.get(approach_id)
+        for approach_id in left_cluster["members"]
+        if far_node_by_approach.get(approach_id) is not None
+    }
+    right_far_nodes = {
+        far_node_by_approach.get(approach_id)
+        for approach_id in right_cluster["members"]
+        if far_node_by_approach.get(approach_id) is not None
+    }
+    return bool(left_far_nodes and right_far_nodes and left_far_nodes.intersection(right_far_nodes))
+
+
+def _merge_special_side_required_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> list[dict[str, Any]]:
+    merged = [{"angles": list(cluster["angles"]), "members": list(cluster["members"])} for cluster in clusters]
+    while True:
+        best_pair: tuple[float, int, int] | None = None
+        cluster_count = len(merged)
+        if cluster_count <= 1:
+            return merged
+        for idx, cluster in enumerate(merged):
+            requirements = _cluster_side_requirements(cluster, approach_by_id=approach_by_id)
+            if not requirements:
+                continue
+            for side, anchor_angles in requirements.items():
+                candidate_targets: list[tuple[float, int]] = []
+                for target_idx in _neighbor_cluster_indices(idx, cluster_count):
+                    target_angles = _cluster_side_travel_angles(
+                        merged[target_idx],
+                        movement_side=side,
+                        approach_by_id=approach_by_id,
+                    )
+                    if not target_angles:
+                        continue
+                    candidate_targets.append((_min_circular_diff(anchor_angles, target_angles), target_idx))
+                if not candidate_targets:
+                    continue
+                candidate_targets.sort()
+                best_diff, best_target_idx = candidate_targets[0]
+                if len(candidate_targets) >= 2:
+                    second_diff = candidate_targets[1][0]
+                    if second_diff - best_diff < _ARM_SPECIAL_SIDE_CLEAR_GAP_DEG:
+                        continue
+                pair = (best_diff, idx, best_target_idx)
+                if best_pair is None or pair < best_pair:
+                    best_pair = pair
+        if best_pair is None:
+            return merged
+        _diff, source_idx, target_idx = best_pair
+        _merge_adjacent_clusters(merged, source_idx=source_idx, target_idx=target_idx)
+
+
+def _cluster_side_requirements(
+    cluster: dict[str, Any],
+    *,
+    approach_by_id: dict[str, ApproachModel],
+) -> dict[str, list[float]]:
+    requirements: dict[str, list[float]] = {}
+    entry_items = [
+        approach_by_id[approach_id]
+        for approach_id in cluster["members"]
+        if approach_by_id[approach_id].movement_side == "entry"
+    ]
+    exit_items = [
+        approach_by_id[approach_id]
+        for approach_id in cluster["members"]
+        if approach_by_id[approach_id].movement_side == "exit"
+    ]
+
+    entry_anchors = [item.travel_angle_deg for item in entry_items if _requires_entry_companion(item)]
+    if entry_anchors and len(entry_items) < 2:
+        requirements["entry"] = entry_anchors
+
+    exit_anchors = [item.travel_angle_deg for item in exit_items if _requires_exit_companion(item)]
+    if exit_anchors and len(exit_items) < 2:
+        requirements["exit"] = exit_anchors
+    return requirements
+
+
+def _requires_entry_companion(approach: ApproachModel) -> bool:
+    if approach.approach_profile in _SPECIAL_COMPANION_ENTRY_PROFILES:
+        return True
+    if approach.approach_profile not in {"default_signalized", "unknown"}:
+        return True
+    return approach.is_core_signalized_approach is False
+
+
+def _requires_exit_companion(approach: ApproachModel) -> bool:
+    if approach.exit_leg_role in _SPECIAL_COMPANION_EXIT_ROLES:
+        return True
+    return approach.is_standard_exit_leg is False
+
+
+def _cluster_side_travel_angles(
+    cluster: dict[str, Any],
+    *,
+    movement_side: str,
+    approach_by_id: dict[str, ApproachModel],
+) -> list[float]:
+    return [
+        approach_by_id[approach_id].travel_angle_deg
+        for approach_id in cluster["members"]
+        if approach_by_id[approach_id].movement_side == movement_side
+    ]
+
+
+def _min_circular_diff(left_angles: list[float], right_angles: list[float]) -> float:
+    if not left_angles or not right_angles:
+        return 360.0
+    return min(
+        circular_diff_deg(left_angle, right_angle)
+        for left_angle in left_angles
+        for right_angle in right_angles
     )
 
 

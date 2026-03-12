@@ -80,6 +80,13 @@ def build_arm_debug_payload(result: T04RunResult) -> dict[str, Any]:
                 "remarks": list(arm.remarks),
                 "member_approach_ids": [approach.approach_id for approach in member_approaches],
                 "member_node_ids": member_node_ids,
+                "member_far_node_ids": _stable_unique(
+                    [
+                        _extract_far_node_id(approach)
+                        for approach in member_approaches
+                        if _extract_far_node_id(approach) is not None
+                    ]
+                ),
                 "member_node_order_indexes": member_node_indexes,
                 "member_node_spans": member_node_spans,
                 "is_contiguous_on_circle": len(member_node_spans) <= 1,
@@ -421,6 +428,7 @@ def _serialize_arm_debug_approach(approach: ApproachModel) -> dict[str, Any]:
         "approach_id": approach.approach_id,
         "road_id": approach.road_id,
         "node_id": approach.node_id,
+        "far_node_id": _extract_far_node_id(approach),
         "arm_id": approach.arm_id,
         "movement_side": approach.movement_side,
         "direction_type": approach.direction_type,
@@ -486,6 +494,14 @@ def _build_circular_spans(indexes: list[int], total_nodes: int) -> list[dict[str
         }
         for segment in segments
     ]
+
+
+def _extract_far_node_id(approach: ApproachModel) -> Any | None:
+    for ref in approach.evidence_refs:
+        if not ref.startswith("far_node:"):
+            continue
+        return ref.split(":", 1)[1]
+    return None
 
 
 __all__ = [

@@ -158,6 +158,7 @@ def test_arm_debug_payload_contains_ccw_nodes_and_arm_membership() -> None:
     assert len(payload["arms"]) == len(result.bundle.arms)
     assert payload["ordered_nodes"][0]["approaches"]
     assert "member_node_spans" in payload["arms"][0]
+    assert "far_node_id" in payload["ordered_nodes"][0]["approaches"][0]
 
 
 def test_review_payloads_cover_unknown_nonstandard_and_profile_gap_views() -> None:
