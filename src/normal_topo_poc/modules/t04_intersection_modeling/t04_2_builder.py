@@ -61,6 +61,7 @@ _ARM_SINGLETON_MERGE_DEG = 50.0
 _ARM_SINGLETON_CLEAR_GAP_DEG = 7.0
 _ARM_SPECIAL_SIDE_CLEAR_GAP_DEG = 10.0
 _ARM_SPECIAL_SIDE_ATTACH_DEG = 60.0
+_PROVISIONAL_ARM_SIDE_SPREAD_DEG = 60.0
 
 _SPECIAL_COMPANION_ENTRY_PROFILES = {
     "left_uturn_service",
@@ -639,11 +640,14 @@ def _build_seed_partition_clusters(
         for root in seed_roots
     }
     seed_rank_by_root = {root: rank for rank, root in enumerate(seed_roots)}
+    provisional_members_by_arm: dict[str, list[ApproachModel]] = defaultdict(list)
+    for approach in approach_by_id.values():
+        provisional_members_by_arm[approach.arm_id].append(approach)
     component_angles = {
         root: [
             angle
-        for node_id in component_nodes[root]
-        for angle in next(item["angles"] for item in ordered_nodes if item["node_id"] == node_id)
+            for node_id in component_nodes[root]
+            for angle in next(item["angles"] for item in ordered_nodes if item["node_id"] == node_id)
         ]
         for root in component_nodes
     }
@@ -663,7 +667,11 @@ def _build_seed_partition_clusters(
                 for approach_id in next(item["members"] for item in ordered_nodes if item["node_id"] == node_id)
             ]
         )
-        if len(provisional_arm_ids) == 1 and provisional_arm_ids[0] in seed_root_by_provisional_arm:
+        if (
+            len(provisional_arm_ids) == 1
+            and provisional_arm_ids[0] in seed_root_by_provisional_arm
+            and _provisional_arm_is_locally_coherent(provisional_members_by_arm[provisional_arm_ids[0]])
+        ):
             component_assignment[root] = seed_root_by_provisional_arm[provisional_arm_ids[0]]
             continue
         required_root = _select_required_seed_root(
@@ -807,6 +815,26 @@ def _select_clear_required_seed_root(
     if len(candidates) >= 2 and candidates[1][0] - candidates[0][0] < _ARM_SPECIAL_SIDE_CLEAR_GAP_DEG:
         return None
     return candidates[0][1]
+
+
+def _provisional_arm_is_locally_coherent(approaches: list[ApproachModel]) -> bool:
+    entry_angles = [approach.side_angle_deg for approach in approaches if approach.movement_side == "entry"]
+    exit_angles = [approach.side_angle_deg for approach in approaches if approach.movement_side == "exit"]
+    return _angles_are_locally_coherent(entry_angles) and _angles_are_locally_coherent(exit_angles)
+
+
+def _angles_are_locally_coherent(angles: list[float]) -> bool:
+    if len(angles) <= 1:
+        return True
+    ordered = sorted(float(angle) % 360.0 for angle in angles)
+    max_gap = 0.0
+    for idx, angle in enumerate(ordered):
+        next_angle = ordered[(idx + 1) % len(ordered)]
+        gap = (next_angle - angle) % 360.0
+        if gap > max_gap:
+            max_gap = gap
+    covered_arc = 360.0 - max_gap
+    return covered_arc <= _PROVISIONAL_ARM_SIDE_SPREAD_DEG
 
 
 def _stable_node_ids(node_ids: list[Any]) -> list[Any]:
